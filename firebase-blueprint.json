@@ -1,0 +1,141 @@
+{
+  "entities": {
+    "Student": {
+      "title": "Student",
+      "description": "Hồ sơ thể trạng nhân trắc học và đánh giá thể chất học sinh THPT",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "maxLength": 50 },
+        "name": { "type": "string", "maxLength": 100, "minLength": 1 },
+        "class": { "type": "string", "maxLength": 20, "minLength": 1 },
+        "gender": { "type": "string", "enum": ["Nam", "Nữ"] },
+        "heightCm": { "type": "number" },
+        "weightKg": { "type": "number" },
+        "bmi": { "type": "number" },
+        "status": { "type": "string", "enum": ["standard", "overweight", "underweight", "mild"] },
+        "medicalNote": { "type": "string", "maxLength": 500 },
+        "evalTech": { "type": "string", "maxLength": 500 },
+        "evalAttitude": { "type": "string", "maxLength": 500 },
+        "evalDigital": { "type": "string", "maxLength": 500 },
+        "rating": { "type": "string", "maxLength": 50 },
+        "parentPhone": { "type": "string", "maxLength": 30 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name", "class", "gender", "heightCm", "weightKg", "bmi", "status"]
+    },
+    "ClassRoom": {
+      "title": "ClassRoom",
+      "description": "Danh mục lớp học trường THPT Huỳnh Tấn Phát",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 30, "minLength": 1 },
+        "grade": { "type": "string", "enum": ["10", "11", "12"] },
+        "homeroomTeacher": { "type": "string", "maxLength": 100 },
+        "peTeacher": { "type": "string", "maxLength": 100 },
+        "schoolYear": { "type": "string", "maxLength": 30 },
+        "note": { "type": "string", "maxLength": 300 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name", "grade"]
+    },
+    "Teacher": {
+      "title": "Teacher",
+      "description": "Danh mục giáo viên Giáo dục Thể chất trường THPT Huỳnh Tấn Phát",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "maxLength": 50 },
+        "name": { "type": "string", "maxLength": 100, "minLength": 1 },
+        "email": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "position": { "type": "string", "maxLength": 80 },
+        "specialty": { "type": "string", "maxLength": 120 },
+        "assignedClasses": { "type": "string", "maxLength": 200 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "name"]
+    },
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Tài khoản người dùng đăng nhập qua Google và phân quyền bởi Admin",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 120, "minLength": 3 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "role": { "type": "string", "enum": ["admin", "gv", "viewer", "hs"] },
+        "status": { "type": "string", "enum": ["approved", "pending", "rejected"] },
+        "canManageStudents": { "type": "boolean" },
+        "canManageClasses": { "type": "boolean" },
+        "canManageTeachers": { "type": "boolean" },
+        "canManageUsers": { "type": "boolean" },
+        "approvedBy": { "type": "string", "maxLength": 120 },
+        "requestedAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["uid", "email", "role", "status"]
+    },
+    "AdminNotification": {
+      "title": "AdminNotification",
+      "description": "Thông báo yêu cầu xét duyệt tài khoản gửi tới Admin boconglam@gmail.com và tdtt.htp@gmail.com",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "requesterUid": { "type": "string", "maxLength": 128 },
+        "requesterEmail": { "type": "string", "maxLength": 120 },
+        "requesterName": { "type": "string", "maxLength": 100 },
+        "targetAdmins": { "type": "string", "maxLength": 200 },
+        "message": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["unread", "read", "resolved"] },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "requesterUid", "requesterEmail", "status", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Nhật ký hoạt động tác vụ sửa, xoá, thay đổi dữ liệu trên hệ thống",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actionType": { "type": "string", "enum": ["CREATE", "UPDATE", "DELETE", "BULK_DELETE", "IMPORT_EXCEL", "PERMISSION_CHANGE", "AUTH"] },
+        "targetEntity": { "type": "string", "enum": ["HOC_SINH", "LOP_HOC", "GIAO_VIEN", "TAI_KHOAN", "HE_THONG"] },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 120 },
+        "actorName": { "type": "string", "maxLength": 100 },
+        "summary": { "type": "string", "maxLength": 300, "minLength": 1 },
+        "details": { "type": "string", "maxLength": 1500 },
+        "timestamp": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "actionType", "targetEntity", "actorEmail", "summary", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Danh mục lưu trữ và đồng bộ đám mây toàn bộ hồ sơ học sinh các lớp"
+    },
+    "/classes/{classId}": {
+      "schema": "ClassRoom",
+      "description": "Danh sách lớp học của trường THPT Huỳnh Tấn Phát"
+    },
+    "/teachers/{teacherId}": {
+      "schema": "Teacher",
+      "description": "Danh sách giáo viên bộ môn Giáo dục Thể chất"
+    },
+    "/users/{userId}": {
+      "schema": "UserAccount",
+      "description": "Danh sách tài khoản đăng nhập hệ thống qua Google và trạng thái phê duyệt"
+    },
+    "/admin_notifications/{notificationId}": {
+      "schema": "AdminNotification",
+      "description": "Thông báo gửi đến 2 tài khoản quản trị boconglam@gmail.com và tdtt.htp@gmail.com khi có người dùng xin cấp quyền"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Nhật ký ghi lại toàn bộ hoạt động thêm, sửa, xoá, nhập Excel, phân quyền trên hệ thống"
+    }
+  }
+}

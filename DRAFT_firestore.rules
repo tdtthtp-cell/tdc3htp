@@ -1,0 +1,284 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // GLOBAL SAFETY NET (DEFAULT DENY)
+    // =========================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================
+    // PHASE 3: HARDENED GLOBAL PRIMITIVES
+    // =========================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // Bootstrapped Super Admins: boconglam@gmail.com and tdtt.htp@gmail.com
+    function isSuperAdminEmail() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'boconglam@gmail.com' ||
+        request.auth.token.email == 'tdtt.htp@gmail.com'
+      );
+    }
+
+    // Admin check: Super Admin email OR approved admin document in /users/{uid}
+    function isAdmin() {
+      return isSuperAdminEmail() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+      );
+    }
+
+    // Approved user check: Super Admin OR approved account in /users/{uid}
+    function isApprovedUser() {
+      return isSuperAdminEmail() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'approved'
+      );
+    }
+
+    // =========================================================
+    // VALIDATION BLUEPRINTS (ANTI-UPDATE-GAP)
+    // =========================================================
+    function isValidStudent(data) {
+      return data.keys().hasAll(['id', 'name', 'class', 'gender', 'heightCm', 'weightKg', 'bmi', 'status'])
+        && data.keys().hasOnly([
+          'id', 'code', 'name', 'class', 'gender', 'heightCm', 'weightKg', 'bmi', 'status',
+          'medicalNote', 'evalTech', 'evalAttitude', 'evalDigital', 'rating', 'parentPhone', 'updatedAt'
+        ])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && (!('code' in data) || (data.code is string && data.code.size() <= 50))
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.class is string && data.class.size() >= 1 && data.class.size() <= 20
+        && data.gender is string && (data.gender == 'Nam' || data.gender == 'Nữ')
+        && data.heightCm is number && data.heightCm > 0 && data.heightCm <= 260
+        && data.weightKg is number && data.weightKg > 0 && data.weightKg <= 250
+        && data.bmi is number && data.bmi > 0 && data.bmi <= 100
+        && data.status is string && (data.status == 'standard' || data.status == 'overweight' || data.status == 'underweight' || data.status == 'mild')
+        && (!('medicalNote' in data) || (data.medicalNote is string && data.medicalNote.size() <= 500))
+        && (!('evalTech' in data) || (data.evalTech is string && data.evalTech.size() <= 500))
+        && (!('evalAttitude' in data) || (data.evalAttitude is string && data.evalAttitude.size() <= 500))
+        && (!('evalDigital' in data) || (data.evalDigital is string && data.evalDigital.size() <= 500))
+        && (!('rating' in data) || (data.rating is string && data.rating.size() <= 50))
+        && (!('parentPhone' in data) || (data.parentPhone is string && data.parentPhone.size() <= 30))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    function isValidClassRoom(data) {
+      return data.keys().hasAll(['id', 'name', 'grade'])
+        && data.keys().hasOnly(['id', 'name', 'grade', 'homeroomTeacher', 'peTeacher', 'schoolYear', 'note', 'updatedAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 30
+        && data.grade is string && (data.grade == '10' || data.grade == '11' || data.grade == '12')
+        && (!('homeroomTeacher' in data) || (data.homeroomTeacher is string && data.homeroomTeacher.size() <= 100))
+        && (!('peTeacher' in data) || (data.peTeacher is string && data.peTeacher.size() <= 100))
+        && (!('schoolYear' in data) || (data.schoolYear is string && data.schoolYear.size() <= 30))
+        && (!('note' in data) || (data.note is string && data.note.size() <= 300))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    function isValidTeacher(data) {
+      return data.keys().hasAll(['id', 'name'])
+        && data.keys().hasOnly(['id', 'code', 'name', 'email', 'phone', 'position', 'specialty', 'assignedClasses', 'updatedAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && (!('code' in data) || (data.code is string && data.code.size() <= 50))
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && (!('email' in data) || (data.email is string && data.email.size() <= 120))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 30))
+        && (!('position' in data) || (data.position is string && data.position.size() <= 80))
+        && (!('specialty' in data) || (data.specialty is string && data.specialty.size() <= 120))
+        && (!('assignedClasses' in data) || (data.assignedClasses is string && data.assignedClasses.size() <= 200))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'status'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'role', 'status',
+          'canManageStudents', 'canManageClasses', 'canManageTeachers', 'canManageUsers',
+          'approvedBy', 'requestedAt', 'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 100))
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && data.role is string && (data.role == 'admin' || data.role == 'gv' || data.role == 'viewer' || data.role == 'hs')
+        && data.status is string && (data.status == 'approved' || data.status == 'pending' || data.status == 'rejected')
+        && (!('canManageStudents' in data) || data.canManageStudents is bool)
+        && (!('canManageClasses' in data) || data.canManageClasses is bool)
+        && (!('canManageTeachers' in data) || data.canManageTeachers is bool)
+        && (!('canManageUsers' in data) || data.canManageUsers is bool)
+        && (!('approvedBy' in data) || (data.approvedBy is string && data.approvedBy.size() <= 120))
+        && (!('requestedAt' in data) || (data.requestedAt is string && data.requestedAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
+
+    function isValidAdminNotification(data) {
+      return data.keys().hasAll(['id', 'requesterUid', 'requesterEmail', 'status', 'createdAt'])
+        && data.keys().hasOnly(['id', 'requesterUid', 'requesterEmail', 'requesterName', 'targetAdmins', 'message', 'status', 'createdAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.requesterUid is string && data.requesterUid.size() >= 1 && data.requesterUid.size() <= 128
+        && data.requesterEmail is string && data.requesterEmail.size() >= 3 && data.requesterEmail.size() <= 120
+        && (!('requesterName' in data) || (data.requesterName is string && data.requesterName.size() <= 100))
+        && (!('targetAdmins' in data) || (data.targetAdmins is string && data.targetAdmins.size() <= 200))
+        && (!('message' in data) || (data.message is string && data.message.size() <= 500))
+        && data.status is string && (data.status == 'unread' || data.status == 'read' || data.status == 'resolved')
+        && data.createdAt is string && data.createdAt.size() <= 50;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'actionType', 'targetEntity', 'actorEmail', 'summary', 'timestamp'])
+        && data.keys().hasOnly(['id', 'actionType', 'targetEntity', 'actorUid', 'actorEmail', 'actorName', 'summary', 'details', 'timestamp'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.actionType is string && (
+          data.actionType == 'CREATE' ||
+          data.actionType == 'UPDATE' ||
+          data.actionType == 'DELETE' ||
+          data.actionType == 'BULK_DELETE' ||
+          data.actionType == 'IMPORT_EXCEL' ||
+          data.actionType == 'PERMISSION_CHANGE' ||
+          data.actionType == 'AUTH'
+        )
+        && data.targetEntity is string && (
+          data.targetEntity == 'HOC_SINH' ||
+          data.targetEntity == 'LOP_HOC' ||
+          data.targetEntity == 'GIAO_VIEN' ||
+          data.targetEntity == 'TAI_KHOAN' ||
+          data.targetEntity == 'HE_THONG'
+        )
+        && (!('actorUid' in data) || (data.actorUid is string && data.actorUid.size() <= 128))
+        && data.actorEmail is string && data.actorEmail.size() >= 3 && data.actorEmail.size() <= 120
+        && (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 100))
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 300
+        && (!('details' in data) || (data.details is string && data.details.size() <= 1500))
+        && data.timestamp is string && data.timestamp.size() <= 50;
+    }
+
+    // =========================================================
+    // COLLECTION 1: STUDENTS (/students/{studentId})
+    // =========================================================
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && existing().id is string;
+      allow list: if existing().id is string && existing().name.size() <= 100;
+      allow create: if isValidId(studentId) && isValidStudent(incoming()) && incoming().id == studentId && isApprovedUser();
+      allow update: if isValidId(studentId) && isValidStudent(incoming()) && incoming().id == existing().id && (
+        isAdmin() ||
+        (isApprovedUser() && incoming().diff(existing()).affectedKeys().hasOnly([
+          'code', 'name', 'class', 'gender', 'heightCm', 'weightKg', 'bmi', 'status',
+          'medicalNote', 'evalTech', 'evalAttitude', 'evalDigital', 'rating', 'parentPhone', 'updatedAt'
+        ]))
+      );
+      allow delete: if isValidId(studentId) && isApprovedUser();
+    }
+
+    // =========================================================
+    // COLLECTION 2: CLASSES (/classes/{classId})
+    // =========================================================
+    match /classes/{classId} {
+      allow get: if isValidId(classId) && existing().id is string;
+      allow list: if existing().id is string && existing().name.size() <= 30;
+      allow create: if isValidId(classId) && isValidClassRoom(incoming()) && incoming().id == classId && isApprovedUser();
+      allow update: if isValidId(classId) && isValidClassRoom(incoming()) && incoming().id == existing().id && (
+        isAdmin() ||
+        (isApprovedUser() && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'grade', 'homeroomTeacher', 'peTeacher', 'schoolYear', 'note', 'updatedAt'
+        ]))
+      );
+      allow delete: if isValidId(classId) && isApprovedUser();
+    }
+
+    // =========================================================
+    // COLLECTION 3: TEACHERS (/teachers/{teacherId})
+    // =========================================================
+    match /teachers/{teacherId} {
+      allow get: if isValidId(teacherId) && existing().id is string;
+      allow list: if existing().id is string && existing().name.size() <= 100;
+      allow create: if isValidId(teacherId) && isValidTeacher(incoming()) && incoming().id == teacherId && isApprovedUser();
+      allow update: if isValidId(teacherId) && isValidTeacher(incoming()) && incoming().id == existing().id && (
+        isAdmin() ||
+        (isApprovedUser() && incoming().diff(existing()).affectedKeys().hasOnly([
+          'code', 'name', 'email', 'phone', 'position', 'specialty', 'assignedClasses', 'updatedAt'
+        ]))
+      );
+      allow delete: if isValidId(teacherId) && isApprovedUser();
+    }
+
+    // =========================================================
+    // COLLECTION 4: USER ACCOUNTS (/users/{userId})
+    // =========================================================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerifiedUser() && (request.auth.uid == userId || isAdmin());
+      allow list: if isVerifiedUser() && (existing().uid == request.auth.uid || isSuperAdminEmail());
+      allow create: if isValidId(userId) && isVerifiedUser() && isValidUserAccount(incoming()) && incoming().uid == userId && (
+        isAdmin() ||
+        (
+          request.auth.uid == userId &&
+          incoming().email == request.auth.token.email &&
+          incoming().status == 'pending' &&
+          (incoming().role == 'gv' || incoming().role == 'viewer' || incoming().role == 'hs') &&
+          (!('canManageUsers' in incoming()) || incoming().canManageUsers == false)
+        )
+      );
+      allow update: if isValidId(userId) && isVerifiedUser() && isValidUserAccount(incoming()) && incoming().uid == existing().uid && (
+        isAdmin() ||
+        (
+          request.auth.uid == userId &&
+          incoming().role == existing().role &&
+          incoming().status == existing().status &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // =========================================================
+    // COLLECTION 5: ADMIN NOTIFICATIONS (/admin_notifications/{notificationId})
+    // =========================================================
+    match /admin_notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isVerifiedUser() && (existing().requesterUid == request.auth.uid || isAdmin());
+      allow list: if isVerifiedUser() && (existing().requesterUid == request.auth.uid || isSuperAdminEmail());
+      allow create: if isValidId(notificationId) && isVerifiedUser() && isValidAdminNotification(incoming())
+        && incoming().id == notificationId
+        && (incoming().requesterUid == request.auth.uid || isAdmin());
+      allow update: if isValidId(notificationId) && isValidAdminNotification(incoming()) && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'message']);
+      allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
+    // =========================================================
+    // COLLECTION 6: AUDIT LOGS (/audit_logs/{logId})
+    // =========================================================
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isVerifiedUser() && existing().id is string;
+      allow list: if isVerifiedUser() && existing().id is string && existing().summary.size() <= 300;
+      allow create: if isValidId(logId) && isVerifiedUser() && isValidAuditLog(incoming())
+        && incoming().id == logId
+        && incoming().actorEmail == request.auth.token.email;
+      allow update: if false;
+      allow delete: if isValidId(logId) && isAdmin();
+    }
+
+  }
+}
