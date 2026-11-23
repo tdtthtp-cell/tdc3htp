@@ -10,7 +10,7 @@ import {
 import { LessonDiagrams } from './LessonDiagrams';
 import { generateStandardKHBD } from '../utils/lessonPlanGenerator';
 import { exportLessonPlanToWord } from '../utils/exportWord';
-import { CourtPhotoCaptureModal } from './CourtPhotoCaptureModal';
+import { CourtPhotoCaptureModal, CameraDeviceDiagnostic } from './CourtPhotoCaptureModal';
 import { LessonDiagramImage } from '../types';
 import { checkDiagramMatchesLesson } from '../utils/diagramMatcher';
 
@@ -136,12 +136,125 @@ export const TabKHBD: React.FC<TabKHBDProps> = ({
   };
 
   // ==========================================
-  // HỌC LIỆU HÌNH ẢNH MINH HỌA: CHỌN TỪ THIẾT BỊ & CHỤP QUA DROIDCAM
+  // HỌC LIỆU HÌNH ẢNH MINH HỌA: CAMERA LAPTOP, KIỂM TRA THIẾT BỊ & DROIDCAM
   // ==========================================
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState<boolean>(false);
+  const [photoModalInitialMode, setPhotoModalInitialMode] = useState<'laptop-webcam' | 'droidcam' | 'mobile-camera' | 'upload'>('laptop-webcam');
   const [courtPhotos, setCourtPhotos] = useState<LessonDiagramImage[]>([]);
   const [photoNotification, setPhotoNotification] = useState<string>('');
   const [deletedDiagramIds, setDeletedDiagramIds] = useState<string[]>([]);
+  const [cameraDeviceDiagnostic, setCameraDeviceDiagnostic] = useState<CameraDeviceDiagnostic | null>(null);
+  const [isCheckingDeviceQuick, setIsCheckingDeviceQuick] = useState<boolean>(false);
+
+  // Kiểm tra thiết bị chụp ảnh trực tiếp trên Laptop và hiển thị thông báo "Thiết bị chụp ảnh đã sẵn sàng!"
+  const handleQuickCheckCameraDevice = async (openModalAfterCheck: boolean = false) => {
+    setIsCheckingDeviceQuick(true);
+    setPhotoNotification('Đang kiểm tra phần cứng Camera trên Laptop và thiết bị chụp ảnh...');
+
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const failDiag: CameraDeviceDiagnostic = {
+          isReady: false,
+          isChecking: false,
+          deviceCount: 0,
+          activeDeviceName: 'Chưa nhận diện được Camera',
+          activeDeviceId: '',
+          resolution: 'N/A',
+          frameRate: 'N/A',
+          isLaptopBuiltIn: false,
+          isDroidCam: false,
+          message: 'Trình duyệt hiện tại chưa hỗ trợ truy cập Camera trực tiếp. Vui lòng mở trên trình duyệt Chrome/Edge của Laptop.',
+          checkedAt: new Date().toLocaleTimeString('vi-VN')
+        };
+        setCameraDeviceDiagnostic(failDiag);
+        setPhotoNotification(failDiag.message);
+        setIsCheckingDeviceQuick(false);
+        return;
+      }
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+      }
+
+      const track = stream.getVideoTracks()[0];
+      const settings = track?.getSettings ? track.getSettings() : {};
+      const label = track?.label || 'Camera Laptop (Integrated Webcam)';
+
+      let videoInputs: MediaDeviceInfo[] = [];
+      if (navigator.mediaDevices.enumerateDevices) {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        videoInputs = all.filter(d => d.kind === 'videoinput');
+      }
+
+      // Giải phóng stream kiểm tra nhanh
+      stream.getTracks().forEach(t => t.stop());
+
+      const width = settings.width || 1280;
+      const height = settings.height || 720;
+      const resText = `${width} × ${height} px (HD)`;
+      const fpsText = settings.frameRate ? `${Math.round(settings.frameRate)} FPS` : '30-60 FPS';
+      const isDroid = label.toLowerCase().includes('droidcam') || label.toLowerCase().includes('vcam');
+      const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const readyMsg = `Thông báo: Thiết bị chụp ảnh đã sẵn sàng! Đã kết nối "${label}" (${resText}, phát hiện ${Math.max(1, videoInputs.length)} camera).`;
+
+      const successDiag: CameraDeviceDiagnostic = {
+        isReady: true,
+        isChecking: false,
+        deviceCount: Math.max(1, videoInputs.length),
+        activeDeviceName: label,
+        activeDeviceId: settings.deviceId || '',
+        resolution: resText,
+        frameRate: fpsText,
+        isLaptopBuiltIn: !isDroid,
+        isDroidCam: isDroid,
+        message: readyMsg,
+        checkedAt: timeStr
+      };
+
+      setCameraDeviceDiagnostic(successDiag);
+      setPhotoNotification(readyMsg);
+      setIsCheckingDeviceQuick(false);
+
+      if (openModalAfterCheck) {
+        setPhotoModalInitialMode('laptop-webcam');
+        setIsPhotoModalOpen(true);
+      }
+    } catch (err: any) {
+      setIsCheckingDeviceQuick(false);
+      let errMsg = 'Không thể kết nối Camera trên Laptop. Vui lòng kiểm tra quyền truy cập Camera trên trình duyệt.';
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        errMsg = 'Quyền truy cập Camera bị từ chối. Thầy/Cô hãy chọn "Cho phép (Allow)" ở biểu tượng Camera trên thanh địa chỉ trình duyệt rồi bấm Kiểm tra lại.';
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        errMsg = 'Không tìm thấy thiết bị Camera trên Laptop. Vui lòng kiểm tra phím bật Webcam trên bàn phím hoặc kết nối Webcam USB.';
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        errMsg = 'Camera Laptop đang được sử dụng bởi ứng dụng khác (Zoom, Meet, Zalo). Vui lòng đóng ứng dụng đó và kiểm tra lại.';
+      }
+      const failDiag: CameraDeviceDiagnostic = {
+        isReady: false,
+        isChecking: false,
+        deviceCount: 0,
+        activeDeviceName: 'Chưa sẵn sàng',
+        activeDeviceId: '',
+        resolution: 'N/A',
+        frameRate: 'N/A',
+        isLaptopBuiltIn: false,
+        isDroidCam: false,
+        message: errMsg,
+        checkedAt: new Date().toLocaleTimeString('vi-VN')
+      };
+      setCameraDeviceDiagnostic(failDiag);
+      setPhotoNotification(errMsg);
+    }
+  };
 
   // Tự động làm mới danh sách đã xóa khi chuyển bài học, phân môn hoặc khối lớp
   useEffect(() => {
@@ -156,7 +269,7 @@ export const TabKHBD: React.FC<TabKHBDProps> = ({
     imageUrl: string;
     title: string;
     caption: string;
-    source: 'droidcam' | 'device';
+    source: 'droidcam' | 'device' | 'laptop-webcam';
   }) => {
     const newPhoto: LessonDiagramImage = {
       id: `photo-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -171,11 +284,13 @@ export const TabKHBD: React.FC<TabKHBDProps> = ({
 
     setCourtPhotos(prev => [newPhoto, ...prev]);
     setPhotoNotification(
-      photo.source === 'droidcam'
+      photo.source === 'laptop-webcam'
+        ? `Đã chụp và lưu thành công ảnh bằng Camera trên Laptop vào Kế hoạch bài dạy!`
+        : photo.source === 'droidcam'
         ? `Đã chụp và lưu thành công ảnh từ DroidCam vào Kế hoạch bài dạy!`
         : `Đã thêm thành công ảnh từ thiết bị vào Kế hoạch bài dạy!`
     );
-    setTimeout(() => setPhotoNotification(''), 4000);
+    setTimeout(() => setPhotoNotification(''), 5000);
 
     // Tự động cuộn đến danh sách hình ảnh
     setTimeout(() => {
@@ -1046,25 +1161,33 @@ ${detailedPlan.teacherName}`;
                       <i className="fa-solid fa-camera-retro text-emerald-700"></i>
                       <span>Hình Ảnh Minh Họa Thực Tế Trên Sân Tập & Sơ Đồ Bài Dạy:</span>
                     </span>
-                    <span className="text-xs font-sans font-bold bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full border border-emerald-300 w-fit flex items-center gap-1.5">
-                      <i className="fa-solid fa-mobile-screen-button text-emerald-700"></i>
-                      <span>DroidCam Live & Thiết Bị</span>
-                    </span>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {cameraDeviceDiagnostic?.isReady && (
+                        <span className="text-xs font-sans font-bold bg-emerald-600 text-white px-2.5 py-0.5 rounded-full shadow-xs flex items-center gap-1.5">
+                          <i className="fa-solid fa-circle-check text-amber-300"></i>
+                          <span>Thiết bị chụp ảnh đã sẵn sàng ({cameraDeviceDiagnostic.activeDeviceName})</span>
+                        </span>
+                      )}
+                      <span className="text-xs font-sans font-bold bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-full border border-emerald-300 w-fit flex items-center gap-1.5">
+                        <i className="fa-solid fa-laptop text-emerald-700"></i>
+                        <span>Camera Laptop • DroidCam • Thiết Bị</span>
+                      </span>
+                    </div>
                   </div>
 
-                  {/* BẢNG ĐIỀU KHIỂN: KẾT NỐI DROIDCAM & CHỌN ẢNH TỪ THIẾT BỊ */}
+                  {/* BẢNG ĐIỀU KHIỂN: CHỤP ẢNH BẰNG CAMERA LAPTOP, KIỂM TRA THIẾT BỊ & DROIDCAM */}
                   <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950 text-white rounded-2xl p-4 sm:p-5 border-2 border-emerald-500/40 shadow-xl space-y-4 font-sans no-print">
                     
                     {/* Header Khung Điều Khiển */}
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 border-b border-slate-800 pb-3">
                       <div>
-                        <div className="flex items-center gap-2">
-                          <span className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white text-sm shadow-inner">
-                            <i className="fa-solid fa-camera"></i>
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-9 h-9 rounded-lg bg-emerald-600 flex items-center justify-center text-white text-base shadow-inner shrink-0">
+                            <i className="fa-solid fa-laptop"></i>
                           </span>
                           <div>
-                            <h3 className="font-bold text-sm text-emerald-300 uppercase tracking-wide flex items-center gap-2">
-                              <span>Trung Tâm Kết Nối Camera Sân Tập & Đính Kèm Ảnh Minh Họa</span>
+                            <h3 className="font-bold text-sm text-emerald-300 uppercase tracking-wide flex items-center gap-2 flex-wrap">
+                              <span>Trung Tâm Chụp Ảnh Camera Laptop, Kiểm Tra Thiết Bị & Đính Kèm Minh Họa</span>
                             </h3>
                             <p className="text-[11px] text-slate-300">
                               Đã gắn bài dạy: <strong>"{currentLesson.title}"</strong> • Môn {sportObj.name} • THPT Huỳnh Tấn Phát ({schoolLocation}).
@@ -1073,22 +1196,147 @@ ${detailedPlan.teacherName}`;
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className="text-[11px] bg-emerald-900/80 text-emerald-300 border border-emerald-500/40 px-2.5 py-1 rounded-lg flex items-center gap-1.5 font-medium">
+                      <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleQuickCheckCameraDevice(false)}
+                          disabled={isCheckingDeviceQuick}
+                          className="text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-black px-3 py-1.5 rounded-lg flex items-center gap-1.5 cursor-pointer shadow-md transition disabled:opacity-60"
+                          title="Kiểm tra thiết bị chụp ảnh trên laptop và nhận thông báo sẵn sàng"
+                        >
+                          <i className={`fa-solid ${isCheckingDeviceQuick ? 'fa-spinner fa-spin' : 'fa-stethoscope'}`}></i>
+                          <span>{isCheckingDeviceQuick ? 'Đang kiểm tra thiết bị...' : 'Kiểm Tra Thiết Bị Chụp Ảnh'}</span>
+                        </button>
+
+                        <span
+                          className={`text-[11px] px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 font-bold border ${
+                            cameraDeviceDiagnostic?.isReady
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400'
+                              : 'bg-emerald-900/80 text-emerald-300 border-emerald-500/40'
+                          }`}
+                        >
                           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                          <span>Sẵn sàng kết nối sân tập</span>
+                          <span>
+                            {cameraDeviceDiagnostic?.isReady
+                              ? 'Thiết bị chụp ảnh đã sẵn sàng!'
+                              : 'Sẵn sàng kiểm tra & kết nối'}
+                          </span>
                         </span>
                       </div>
                     </div>
 
-                    {/* HÀNG CÁC NÚT TÁC VỤ CHÍNH (4 CÁC NÚT CHỨC NĂNG) */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    {/* BANNER THÔNG BÁO TRẠNG THÁI THIẾT BỊ CHỤP ẢNH ĐÃ SẴN SÀNG */}
+                    {cameraDeviceDiagnostic && (
+                      <div
+                        className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-in fade-in ${
+                          cameraDeviceDiagnostic.isReady
+                            ? 'bg-emerald-950/90 border-2 border-emerald-400 text-emerald-100 shadow-lg'
+                            : 'bg-rose-950/80 border border-rose-500 text-rose-200'
+                        }`}
+                      >
+                        <div className="flex items-start sm:items-center gap-2.5">
+                          <span
+                            className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-sm ${
+                              cameraDeviceDiagnostic.isReady
+                                ? 'bg-emerald-500 text-slate-950 font-black'
+                                : 'bg-rose-600 text-white'
+                            }`}
+                          >
+                            <i className={`fa-solid ${cameraDeviceDiagnostic.isReady ? 'fa-circle-check' : 'fa-triangle-exclamation'}`}></i>
+                          </span>
+                          <div className="text-xs space-y-0.5">
+                            <div className="font-bold flex items-center gap-2 flex-wrap">
+                              {cameraDeviceDiagnostic.isReady ? (
+                                <span className="text-emerald-300 uppercase tracking-wide">
+                                  THÔNG BÁO: THIẾT BỊ CHỤP ẢNH ĐÃ SẴN SÀNG!
+                                </span>
+                              ) : (
+                                <span className="text-rose-300 uppercase tracking-wide">
+                                  CẢNH BÁO KIỂM TRA THIẾT BỊ CHỤP ẢNH
+                                </span>
+                              )}
+                              {cameraDeviceDiagnostic.checkedAt && (
+                                <span className="text-[10px] text-slate-300 font-mono">
+                                  ({cameraDeviceDiagnostic.checkedAt})
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] opacity-95">{cameraDeviceDiagnostic.message}</p>
+                            {cameraDeviceDiagnostic.isReady && (
+                              <div className="flex items-center gap-2 flex-wrap pt-0.5 text-[11px] font-mono text-amber-300">
+                                <span>💻 Tên Camera: <strong>{cameraDeviceDiagnostic.activeDeviceName}</strong></span>
+                                <span>• Độ phân giải: <strong>{cameraDeviceDiagnostic.resolution}</strong></span>
+                                <span>• Số thiết bị: <strong>{cameraDeviceDiagnostic.deviceCount} camera</strong></span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {cameraDeviceDiagnostic.isReady && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPhotoModalInitialMode('laptop-webcam');
+                                setIsPhotoModalOpen(true);
+                              }}
+                              className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-lg text-xs flex items-center gap-1.5 cursor-pointer shadow-md"
+                            >
+                              <i className="fa-solid fa-camera"></i>
+                              <span>Mở Camera Laptop Chụp Ngay</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setCameraDeviceDiagnostic(null)}
+                            className="text-slate-400 hover:text-white px-1.5 py-1 text-xs cursor-pointer"
+                            title="Đóng thông báo"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* HÀNG CÁC NÚT TÁC VỤ CHÍNH (5 NÚT CHỨC NĂNG RÕ RÀNG) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                       
-                      {/* NÚT 1: KẾT NỐI DROIDCAM & MỞ STUDIO CAMERA */}
+                      {/* NÚT 1: CHỤP ẢNH BẰNG CAMERA TRÊN LAPTOP (WEBCAM) */}
                       <button
                         type="button"
-                        onClick={() => setIsPhotoModalOpen(true)}
-                        className="group relative p-3.5 bg-gradient-to-r from-emerald-600 via-emerald-700 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white rounded-xl border border-emerald-400/40 shadow-lg text-left transition-all hover:scale-[1.01] cursor-pointer flex flex-col justify-between space-y-2"
+                        onClick={() => {
+                          setPhotoModalInitialMode('laptop-webcam');
+                          setIsPhotoModalOpen(true);
+                        }}
+                        className="group relative p-3.5 bg-gradient-to-r from-emerald-600 via-emerald-700 to-teal-700 hover:from-emerald-500 hover:to-teal-600 text-white rounded-xl border-2 border-emerald-400/60 shadow-lg text-left transition-all hover:scale-[1.01] cursor-pointer flex flex-col justify-between space-y-2"
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center gap-2.5">
+                            <span className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center text-amber-300 text-base shadow-xs group-hover:bg-white/30 transition">
+                              <i className="fa-solid fa-laptop"></i>
+                            </span>
+                            <div>
+                              <div className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
+                                <span>Camera Trên Laptop</span>
+                                <i className="fa-solid fa-arrow-right text-[10px] opacity-70 group-hover:translate-x-1 transition"></i>
+                              </div>
+                              <span className="text-[10px] text-emerald-200 block">Chụp bằng Webcam Laptop</span>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-emerald-100/90 leading-relaxed">
+                          Tự động kiểm tra Webcam Laptop, thông báo thiết bị sẵn sàng, hẹn giờ chụp & lật gương trực tiếp.
+                        </p>
+                      </button>
+
+                      {/* NÚT 2: KẾT NỐI DROIDCAM PC */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPhotoModalInitialMode('droidcam');
+                          setIsPhotoModalOpen(true);
+                        }}
+                        className="group relative p-3.5 bg-gradient-to-r from-teal-700 to-cyan-800 hover:from-teal-600 hover:to-cyan-700 text-white rounded-xl border border-teal-400/40 shadow-lg text-left transition-all hover:scale-[1.01] cursor-pointer flex flex-col justify-between space-y-2"
                       >
                         <div className="flex items-start justify-between">
                           <div className="flex items-center gap-2.5">
@@ -1097,19 +1345,19 @@ ${detailedPlan.teacherName}`;
                             </span>
                             <div>
                               <div className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
-                                <span>DroidCam & Camera</span>
-                                <i className="fa-solid fa-arrow-right text-[10px] opacity-70 group-hover:translate-x-1 transition"></i>
+                                <span>Kết Nối DroidCam</span>
+                                <i className="fa-solid fa-wifi text-[10px] opacity-70"></i>
                               </div>
-                              <span className="text-[10px] text-emerald-200 block">Webcam 60fps & DroidCam PC</span>
+                              <span className="text-[10px] text-teal-200 block">Điện thoại làm Webcam PC</span>
                             </div>
                           </div>
                         </div>
-                        <p className="text-[11px] text-emerald-100/90 leading-relaxed">
-                          Mở cửa sổ điều khiển camera, căn lưới góc kỹ thuật, nhận diện DroidCam Source 1 tự động.
+                        <p className="text-[11px] text-teal-100/90 leading-relaxed">
+                          Nhận diện luồng DroidCam Source từ điện thoại truyền về máy tính để chụp sân tập từ xa.
                         </p>
                       </button>
 
-                      {/* NÚT 2: CHỤP BẰNG CAMERA ĐIỆN THOẠI TRỰC TIẾP */}
+                      {/* NÚT 3: CHỤP BẰNG CAMERA ĐIỆN THOẠI TRỰC TIẾP */}
                       <label className="group relative p-3.5 bg-gradient-to-r from-sky-700 to-blue-800 hover:from-sky-600 hover:to-blue-700 text-white rounded-xl border border-sky-400/40 shadow-lg text-left transition-all hover:scale-[1.01] cursor-pointer flex flex-col justify-between space-y-2">
                         <input
                           type="file"
@@ -1125,19 +1373,19 @@ ${detailedPlan.teacherName}`;
                             </span>
                             <div>
                               <div className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
-                                <span>Chụp Bằng Điện Thoại</span>
+                                <span>Chụp Điện Thoại</span>
                                 <i className="fa-solid fa-camera text-[10px] text-sky-200 opacity-80"></i>
                               </div>
-                              <span className="text-[10px] text-sky-200 block">Máy ảnh gốc điện thoại/tablet</span>
+                              <span className="text-[10px] text-sky-200 block">Máy ảnh gốc điện thoại</span>
                             </div>
                           </div>
                         </div>
                         <p className="text-[11px] text-sky-100/90 leading-relaxed">
-                          Bấm là mở ngay máy ảnh điện thoại chụp nét căng trên sân, tự động đóng dấu trường và đưa vào KHBD.
+                          Mở ngay máy ảnh điện thoại chụp nét trên sân, tự động đóng dấu trường và đưa vào KHBD.
                         </p>
                       </label>
 
-                      {/* NÚT 3: CHỌN ẢNH TỪ THIẾT BỊ (MÁY TÍNH / ĐIỆN THOẠI) */}
+                      {/* NÚT 4: CHỌN ẢNH TỪ THIẾT BỊ (MÁY TÍNH / ĐIỆN THOẠI) */}
                       <label className="group relative p-3.5 bg-slate-800/90 hover:bg-slate-800 text-white rounded-xl border border-slate-700 hover:border-emerald-500/50 shadow-md text-left transition-all hover:scale-[1.01] cursor-pointer flex flex-col justify-between space-y-2">
                         <input
                           type="file"
@@ -1153,19 +1401,19 @@ ${detailedPlan.teacherName}`;
                             </span>
                             <div>
                               <div className="font-bold text-xs sm:text-sm text-white flex items-center gap-1.5">
-                                <span>Chọn Ảnh Từ Thiết Bị</span>
+                                <span>Chọn Ảnh Từ Máy</span>
                                 <i className="fa-solid fa-cloud-arrow-up text-[10px] text-purple-300 opacity-70"></i>
                               </div>
-                              <span className="text-[10px] text-slate-300 block">Tải nhiều ảnh cùng lúc từ máy</span>
+                              <span className="text-[10px] text-slate-300 block">Tải nhiều ảnh có sẵn</span>
                             </div>
                           </div>
                         </div>
                         <p className="text-[11px] text-slate-300 leading-relaxed">
-                          Chọn ảnh có sẵn từ máy tính hoặc thư viện ảnh (JPG, PNG, WebP) - Tự động nhúng vào file Word.
+                          Chọn ảnh có sẵn từ Laptop hoặc thư viện ảnh (JPG, PNG, WebP) - Tự động nhúng vào file Word.
                         </p>
                       </label>
 
-                      {/* NÚT 4: XOÁ ẢNH KHÔNG ĐÚNG THEO BÀI HỌC */}
+                      {/* NÚT 5: XOÁ ẢNH KHÔNG ĐÚNG THEO BÀI HỌC */}
                       <button
                         type="button"
                         onClick={handleRemoveAllMismatchedImages}
@@ -1186,21 +1434,21 @@ ${detailedPlan.teacherName}`;
                             </span>
                             <div>
                               <div className="font-bold text-xs sm:text-sm flex items-center gap-1.5">
-                                <span>Lọc Bỏ Ảnh Không Khớp</span>
+                                <span>Lọc Ảnh Lệch</span>
                                 {totalMismatchedCount > 0 && (
                                   <span className="text-[10px] bg-rose-600 text-white px-1.5 py-0.2 rounded-full font-mono font-bold">
                                     {totalMismatchedCount}
                                   </span>
                                 )}
                               </div>
-                              <span className="text-[10px] opacity-80 block">Đảm bảo 100% đúng nội dung bài dạy</span>
+                              <span className="text-[10px] opacity-80 block">Đảm bảo đúng bài dạy</span>
                             </div>
                           </div>
                         </div>
                         <p className="text-[11px] opacity-90 leading-relaxed">
                           {totalMismatchedCount > 0
-                            ? `Phát hiện ${totalMismatchedCount} sơ đồ không khớp với bài dạy "${currentLesson.title}". Bấm để xóa sạch ngay!`
-                            : 'Toàn bộ hình ảnh, sơ đồ hiện tại đều chuẩn xác đúng theo nội dung bài học.'}
+                            ? `Phát hiện ${totalMismatchedCount} sơ đồ không khớp với bài dạy. Bấm để xóa ngay!`
+                            : 'Toàn bộ hình ảnh, sơ đồ hiện tại đều chuẩn xác theo nội dung bài học.'}
                         </p>
                       </button>
 
@@ -1225,7 +1473,7 @@ ${detailedPlan.teacherName}`;
 
                   </div>
 
-                  {/* DANH SÁCH HÌNH ẢNH MINH HỌA (DROIDCAM + THIẾT BỊ + SƠ ĐỒ CHUẨN) */}
+                  {/* DANH SÁCH HÌNH ẢNH MINH HỌA (CAMERA LAPTOP + DROIDCAM + THIẾT BỊ + SƠ ĐỒ CHUẨN) */}
                   <div id="lesson-images-gallery" className="space-y-3 pt-1 border-t border-slate-200 scroll-mt-6">
                     
                     {/* THANH THỐNG KÊ HÌNH ẢNH */}
@@ -1235,9 +1483,15 @@ ${detailedPlan.teacherName}`;
                           <i className="fa-solid fa-images text-emerald-700"></i>
                           <span>Hình ảnh minh họa bài dạy ({courtPhotos.length + activeStandardImages.length}):</span>
                         </span>
+                        {courtPhotos.filter(p => p.source === 'laptop-webcam').length > 0 && (
+                          <span className="bg-emerald-100 text-emerald-900 px-2 py-0.5 rounded font-bold text-[11px] border border-emerald-400 flex items-center gap-1">
+                            <i className="fa-solid fa-laptop text-emerald-700"></i>
+                            <span>{courtPhotos.filter(p => p.source === 'laptop-webcam').length} ảnh Camera Laptop</span>
+                          </span>
+                        )}
                         {courtPhotos.filter(p => p.source === 'droidcam').length > 0 && (
-                          <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-semibold text-[11px] border border-emerald-300 flex items-center gap-1">
-                            <i className="fa-solid fa-mobile-screen-button text-emerald-700"></i>
+                          <span className="bg-teal-100 text-teal-800 px-2 py-0.5 rounded font-semibold text-[11px] border border-teal-300 flex items-center gap-1">
+                            <i className="fa-solid fa-mobile-screen-button text-teal-700"></i>
                             <span>{courtPhotos.filter(p => p.source === 'droidcam').length} ảnh DroidCam</span>
                           </span>
                         )}
@@ -1254,14 +1508,25 @@ ${detailedPlan.teacherName}`;
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <button
                           type="button"
-                          onClick={() => setIsPhotoModalOpen(true)}
+                          onClick={() => handleQuickCheckCameraDevice(false)}
+                          className="text-xs font-bold px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 flex items-center gap-1.5 transition cursor-pointer shadow-xs"
+                        >
+                          <i className="fa-solid fa-stethoscope"></i>
+                          <span>Kiểm tra thiết bị</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPhotoModalInitialMode('laptop-webcam');
+                            setIsPhotoModalOpen(true);
+                          }}
                           className="text-xs font-bold px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white flex items-center gap-1.5 transition cursor-pointer shadow-xs"
                         >
-                          <i className="fa-solid fa-camera"></i>
-                          <span>Chụp / Thêm ảnh</span>
+                          <i className="fa-solid fa-laptop"></i>
+                          <span>Chụp bằng Camera Laptop</span>
                         </button>
                         {totalMismatchedCount > 0 && (
                           <button
@@ -1299,22 +1564,33 @@ ${detailedPlan.teacherName}`;
                     {courtPhotos.length + activeStandardImages.length === 0 ? (
                       <div className="p-8 bg-slate-50 border-2 border-dashed border-slate-300 rounded-xl text-center text-xs text-slate-500 space-y-3">
                         <div className="w-14 h-14 rounded-full bg-slate-200 text-slate-400 mx-auto flex items-center justify-center text-2xl">
-                          <i className="fa-solid fa-camera"></i>
+                          <i className="fa-solid fa-laptop"></i>
                         </div>
                         <div>
                           <p className="font-bold text-sm text-slate-700">Chưa có hình ảnh minh họa nào cho bài học này</p>
                           <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-                            Thầy/Cô hãy kết nối điện thoại qua <strong>DroidCam</strong> để chụp trực tiếp khoảnh khắc học sinh thực hành trên sân tập hoặc bấm <strong>"Chọn ảnh từ thiết bị"</strong> để tải lên.
+                            Thầy/Cô hãy bấm <strong>"Chụp bằng Camera Laptop"</strong>, kết nối điện thoại qua <strong>DroidCam</strong> hoặc bấm <strong>"Chọn ảnh từ thiết bị"</strong> để tải lên.
                           </p>
                         </div>
-                        <div className="flex items-center justify-center gap-3 pt-1">
+                        <div className="flex items-center justify-center gap-3 pt-1 flex-wrap">
                           <button
                             type="button"
-                            onClick={() => setIsPhotoModalOpen(true)}
+                            onClick={() => {
+                              setPhotoModalInitialMode('laptop-webcam');
+                              setIsPhotoModalOpen(true);
+                            }}
                             className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-bold text-xs flex items-center gap-2 shadow-xs cursor-pointer"
                           >
-                            <i className="fa-solid fa-mobile-screen-button"></i>
-                            <span>Mở DroidCam Chụp Ảnh</span>
+                            <i className="fa-solid fa-laptop"></i>
+                            <span>Chụp Bằng Camera Laptop</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleQuickCheckCameraDevice(false)}
+                            className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg font-bold text-xs flex items-center gap-2 shadow-xs cursor-pointer"
+                          >
+                            <i className="fa-solid fa-stethoscope"></i>
+                            <span>Kiểm Tra Thiết Bị Chụp Ảnh</span>
                           </button>
                           <label className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold text-xs flex items-center gap-2 shadow-xs cursor-pointer">
                             <i className="fa-solid fa-folder-open"></i>
@@ -1948,7 +2224,7 @@ ${detailedPlan.teacherName}`;
         </div>
       )}
 
-      {/* MODAL KẾT NỐI DROIDCAM / CAMERA SÂN TẬP & CHỌN ẢNH THIẾT BỊ */}
+      {/* MODAL CHỤP ẢNH BẰNG CAMERA LAPTOP / KIỂM TRA THIẾT BỊ / DROIDCAM & CHỌN ẢNH THIẾT BỊ */}
       <CourtPhotoCaptureModal
         isOpen={isPhotoModalOpen}
         onClose={() => setIsPhotoModalOpen(false)}
@@ -1956,6 +2232,8 @@ ${detailedPlan.teacherName}`;
         lessonTitle={currentLesson.title}
         sportName={sportObj.name}
         schoolLocation={schoolLocation}
+        initialMode={photoModalInitialMode}
+        onDeviceStatusChange={(diag) => setCameraDeviceDiagnostic(diag)}
       />
     </div>
   );

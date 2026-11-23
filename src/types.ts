@@ -85,11 +85,11 @@ export interface LessonDiagramImage {
   id: string;
   title: string;
   caption: string;
-  type: 'technique' | 'court' | 'formation' | 'biomechanics' | 'ai-generated' | 'device' | 'droidcam';
+  type: 'technique' | 'court' | 'formation' | 'biomechanics' | 'ai-generated' | 'device' | 'droidcam' | 'laptop-webcam';
   svgType: string;
   imageUrl?: string;
   promptUsed?: string;
-  source?: 'device' | 'droidcam' | 'standard';
+  source?: 'device' | 'droidcam' | 'standard' | 'laptop-webcam';
   createdAt?: string;
 }
 

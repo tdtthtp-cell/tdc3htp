@@ -1,5 +1,19 @@
 import React, { useState, useRef, useEffect } from 'react';
 
+export interface CameraDeviceDiagnostic {
+  isReady: boolean;
+  isChecking: boolean;
+  deviceCount: number;
+  activeDeviceName: string;
+  activeDeviceId: string;
+  resolution: string;
+  frameRate: string;
+  isLaptopBuiltIn: boolean;
+  isDroidCam: boolean;
+  message: string;
+  checkedAt: string;
+}
+
 interface CourtPhotoCaptureModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -7,11 +21,13 @@ interface CourtPhotoCaptureModalProps {
     imageUrl: string;
     title: string;
     caption: string;
-    source: 'droidcam' | 'device';
+    source: 'droidcam' | 'device' | 'laptop-webcam';
   }) => void;
   lessonTitle: string;
   sportName: string;
   schoolLocation?: string;
+  initialMode?: 'laptop-webcam' | 'droidcam' | 'mobile-camera' | 'upload';
+  onDeviceStatusChange?: (diagnostic: CameraDeviceDiagnostic) => void;
 }
 
 export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
@@ -20,10 +36,13 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
   onPhotoCaptured,
   lessonTitle,
   sportName,
-  schoolLocation = 'xã Châu Hưng'
+  schoolLocation = 'xã Châu Hưng',
+  initialMode = 'laptop-webcam',
+  onDeviceStatusChange
 }) => {
   const [activeTab, setActiveTab] = useState<'camera' | 'mobile-camera' | 'droidcam-guide' | 'upload'>('camera');
-  
+  const [preferredSourceMode, setPreferredSourceMode] = useState<'laptop-webcam' | 'droidcam'>('laptop-webcam');
+
   // Camera state
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -36,7 +55,25 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
   const [photoTitle, setPhotoTitle] = useState<string>('');
   const [photoCaption, setPhotoCaption] = useState<string>('');
   const [addWatermark, setAddWatermark] = useState<boolean>(true);
-  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+  const [mirrorVideo, setMirrorVideo] = useState<boolean>(false);
+  const [countdownSeconds, setCountdownSeconds] = useState<number>(0);
+  const [activeCountdown, setActiveCountdown] = useState<number | null>(null);
+
+  // Device diagnostic & readiness notification state
+  const [diagnosticInfo, setDiagnosticInfo] = useState<CameraDeviceDiagnostic>({
+    isReady: false,
+    isChecking: false,
+    deviceCount: 0,
+    activeDeviceName: '',
+    activeDeviceId: '',
+    resolution: '',
+    frameRate: '',
+    isLaptopBuiltIn: true,
+    isDroidCam: false,
+    message: 'Đang chờ kiểm tra thiết bị chụp ảnh...',
+    checkedAt: ''
+  });
+  const [readyToastMessage, setReadyToastMessage] = useState<string>('');
 
   // DroidCam IP state
   const [droidCamIp, setDroidCamIp] = useState<string>('192.168.1.15');
@@ -57,22 +94,31 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
       setCapturedPreview(null);
       setCameraError('');
       setUploadedFilesPreview([]);
-      // Thử tự động bật camera khi mở modal
-      startCamera();
+
+      if (initialMode === 'mobile-camera') {
+        setActiveTab('mobile-camera');
+      } else if (initialMode === 'upload') {
+        setActiveTab('upload');
+      } else {
+        setActiveTab('camera');
+        const mode = initialMode === 'droidcam' ? 'droidcam' : 'laptop-webcam';
+        setPreferredSourceMode(mode);
+        startCamera(undefined, mode, true);
+      }
     } else {
       stopCamera();
     }
     return () => {
       stopCamera();
     };
-  }, [isOpen]);
+  }, [isOpen, initialMode]);
 
   // Ngắt camera khi chuyển sang tab khác
   useEffect(() => {
     if (activeTab !== 'camera') {
       stopCamera();
-    } else if (isOpen && !isCameraActive && !cameraError) {
-      startCamera();
+    } else if (isOpen && !isCameraActive && !isStartingCamera && !cameraError) {
+      startCamera(undefined, preferredSourceMode, false);
     }
   }, [activeTab]);
 
@@ -107,98 +153,248 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
     };
   }, [isOpen, addWatermark, lessonTitle, sportName, schoolLocation]);
 
-  // Hàm quét danh sách thiết bị camera (sau khi đã được cấp quyền)
-  const refreshDevices = async () => {
-    try {
-      if (!navigator.mediaDevices?.enumerateDevices) return;
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoInputs = devices.filter(d => d.kind === 'videoinput');
-      setCameraDevices(videoInputs);
-
-      // Nếu có thiết bị mang tên DroidCam thì tự động ưu tiên
-      const droidCam = videoInputs.find(d => 
-        d.label.toLowerCase().includes('droidcam') || 
-        d.label.toLowerCase().includes('vcam') ||
-        d.label.toLowerCase().includes('source')
-      );
-      if (droidCam && !selectedDeviceId) {
-        setSelectedDeviceId(droidCam.deviceId);
-      }
-    } catch (err) {
-      console.warn('Lỗi quét thiết bị:', err);
-    }
+  // Phân loại thiết bị camera là Camera Laptop tích hợp hay DroidCam
+  const checkIsDroidCamLabel = (label: string) => {
+    const l = label.toLowerCase();
+    return l.includes('droidcam') || l.includes('vcam') || l.includes('obs');
   };
 
-  // Khởi động Camera linh hoạt (Progressive Fallback)
-  const startCamera = async (overrideDeviceId?: string) => {
+  // Khởi động Camera Laptop / Webcam & Kiểm tra thiết bị chụp ảnh
+  const startCamera = async (
+    overrideDeviceId?: string,
+    mode: 'laptop-webcam' | 'droidcam' = preferredSourceMode,
+    showReadyNotification: boolean = true
+  ) => {
     stopCamera();
     setCameraError('');
     setIsStartingCamera(true);
-
-    const targetDeviceId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
+    setDiagnosticInfo(prev => ({
+      ...prev,
+      isChecking: true,
+      isReady: false,
+      message: 'Đang kiểm tra phần cứng camera trên laptop và kết nối thiết bị chụp ảnh...'
+    }));
 
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setCameraError(
-          'Trình duyệt hoặc môi trường hiện tại chưa cho phép truy cập Camera trực tiếp. Thầy/Cô vui lòng dùng nút "Chụp Bằng Camera Điện Thoại" hoặc "Chọn Ảnh Từ Thiết Bị" bên dưới.'
-        );
+        const msg = 'Trình duyệt hiện tại chưa hỗ trợ hoặc chưa cấp quyền WebRTC Camera. Thầy/Cô vui lòng mở bằng Chrome/Edge trên Laptop hoặc chọn ảnh từ thiết bị.';
+        setCameraError(msg);
         setIsStartingCamera(false);
+        const failDiag: CameraDeviceDiagnostic = {
+          isReady: false,
+          isChecking: false,
+          deviceCount: 0,
+          activeDeviceName: 'Chưa nhận diện được Camera',
+          activeDeviceId: '',
+          resolution: 'N/A',
+          frameRate: 'N/A',
+          isLaptopBuiltIn: false,
+          isDroidCam: false,
+          message: msg,
+          checkedAt: new Date().toLocaleTimeString('vi-VN')
+        };
+        setDiagnosticInfo(failDiag);
+        onDeviceStatusChange?.(failDiag);
         return;
+      }
+
+      // Bước 1: Quét danh sách thiết bị ban đầu (nếu đã có quyền từ trước)
+      let initialDevices: MediaDeviceInfo[] = [];
+      if (navigator.mediaDevices.enumerateDevices) {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        initialDevices = all.filter(d => d.kind === 'videoinput');
+      }
+
+      let targetDeviceId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
+
+      // Nếu người dùng chưa chỉ định deviceId cụ thể, tự động ưu tiên Camera Laptop hoặc DroidCam theo chế độ
+      if (!targetDeviceId && initialDevices.length > 0) {
+        if (mode === 'laptop-webcam') {
+          const laptopCam = initialDevices.find(d => d.label && !checkIsDroidCamLabel(d.label));
+          if (laptopCam?.deviceId) {
+            targetDeviceId = laptopCam.deviceId;
+          }
+        } else if (mode === 'droidcam') {
+          const droidCam = initialDevices.find(d => d.label && checkIsDroidCamLabel(d.label));
+          if (droidCam?.deviceId) {
+            targetDeviceId = droidCam.deviceId;
+          }
+        }
       }
 
       let stream: MediaStream | null = null;
 
-      // Lần thử 1: Thử với deviceId nếu đã chọn, hoặc facingMode
+      // Lần thử 1: Độ phân giải HD chuẩn cho Camera Laptop (1280x720) kèm deviceId (nếu có)
       try {
-        const constraints: MediaStreamConstraints = {
-          video: targetDeviceId
-            ? { deviceId: { ideal: targetDeviceId } }
-            : { facingMode: { ideal: facingMode } },
+        const videoConstraints: MediaTrackConstraints = targetDeviceId
+          ? {
+              deviceId: { exact: targetDeviceId },
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            }
+          : {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: { ideal: 'user' }
+            };
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints,
           audio: false
-        };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        });
       } catch (firstErr) {
-        console.warn('Lần thử 1 với ràng buộc cụ thể thất bại, thử chế độ tương thích rộng { video: true }...', firstErr);
-        // Lần thử 2: Chế độ tương thích rộng nhất, không ép độ phân giải hay thiết bị
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        console.warn('Lần thử 1 (HD / Exact Device) chưa khớp, chuyển sang Lần thử 2 linh hoạt cho Webcam Laptop...', firstErr);
+        try {
+          // Lần thử 2: Dùng ideal deviceId không ép độ phân giải
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: targetDeviceId ? { deviceId: { ideal: targetDeviceId } } : true,
+            audio: false
+          });
+        } catch (secondErr) {
+          console.warn('Lần thử 2 chưa khớp, chuyển sang Lần thử 3 tương thích mọi Webcam Laptop { video: true }...', secondErr);
+          // Lần thử 3: Chế độ tương thích tuyệt đối cho mọi dòng Laptop
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false
+          });
+        }
       }
 
       if (stream) {
         streamRef.current = stream;
+
+        // Lấy thông số kỹ thuật thực tế từ video track trên Laptop
+        const videoTrack = stream.getVideoTracks()[0];
+        const settings = videoTrack?.getSettings ? videoTrack.getSettings() : {};
+        const trackLabel = videoTrack?.label || 'Camera Laptop (Integrated Webcam)';
+
+        // Sau khi đã cấp quyền stream, quét lại toàn bộ danh sách thiết bị để hiển thị đầy đủ tên camera
+        let videoInputs: MediaDeviceInfo[] = [];
+        if (navigator.mediaDevices.enumerateDevices) {
+          const allDevices = await navigator.mediaDevices.enumerateDevices();
+          videoInputs = allDevices.filter(d => d.kind === 'videoinput');
+          setCameraDevices(videoInputs);
+        }
+
+        const activeId = settings.deviceId || targetDeviceId || (videoInputs[0]?.deviceId ?? '');
+        if (activeId) {
+          setSelectedDeviceId(activeId);
+        }
+
+        const isDroid = checkIsDroidCamLabel(trackLabel);
+        if (isDroid) {
+          setPreferredSourceMode('droidcam');
+        } else {
+          setPreferredSourceMode('laptop-webcam');
+        }
+
+        const applyDiagnostics = (vw?: number, vh?: number) => {
+          const width = vw || settings.width || 1280;
+          const height = vh || settings.height || 720;
+          const fps = settings.frameRate ? `${Math.round(settings.frameRate)} FPS` : '30-60 FPS';
+          const resText = `${width} × ${height} px (${height >= 720 ? 'HD / Full HD' : 'Chuẩn'})`;
+          const timeStr = new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          const readyMsg = `Thiết bị chụp ảnh đã sẵn sàng! Đã kết nối "${trackLabel}" (${resText}).`;
+
+          const diag: CameraDeviceDiagnostic = {
+            isReady: true,
+            isChecking: false,
+            deviceCount: Math.max(1, videoInputs.length),
+            activeDeviceName: trackLabel,
+            activeDeviceId: activeId,
+            resolution: resText,
+            frameRate: fps,
+            isLaptopBuiltIn: !isDroid,
+            isDroidCam: isDroid,
+            message: readyMsg,
+            checkedAt: timeStr
+          };
+
+          setDiagnosticInfo(diag);
+          onDeviceStatusChange?.(diag);
+
+          if (showReadyNotification) {
+            setReadyToastMessage(readyMsg);
+          }
+        };
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = () => {
             videoRef.current?.play().catch(e => console.warn('Play error:', e));
             setIsCameraActive(true);
             setIsStartingCamera(false);
+            applyDiagnostics(videoRef.current?.videoWidth, videoRef.current?.videoHeight);
           };
+        } else {
+          setIsCameraActive(true);
+          setIsStartingCamera(false);
+          applyDiagnostics();
         }
-
-        // Sau khi đã có stream (đã cấp quyền), quét đầy đủ danh sách thiết bị
-        await refreshDevices();
       }
     } catch (err: any) {
       console.warn('Lỗi mở camera:', err);
       setIsStartingCamera(false);
       setIsCameraActive(false);
 
+      let errMsg = '';
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setCameraError(
-          'Quyền truy cập Camera bị từ chối trong trình duyệt. Thầy/Cô hãy bấm vào biểu tượng Ổ khóa / Camera trên thanh địa chỉ của trình duyệt, chọn "Cho phép (Allow)" rồi bấm "Thử lại", hoặc chuyển sang tab "Chụp Bằng Camera Điện Thoại".'
-        );
+        errMsg = 'Quyền truy cập Camera trên Laptop đang bị chặn. Thầy/Cô hãy bấm vào biểu tượng Ổ khóa / Camera trên thanh địa chỉ trình duyệt, chọn "Cho phép (Allow)" rồi bấm "Kiểm Tra Thiết Bị Chụp Ảnh".';
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setCameraError(
-          'Không tìm thấy camera hoặc webcam kết nối. Nếu dùng DroidCam, Thầy/Cô cần mở DroidCam Client trên máy tính và bấm "Start" trước khi mở trang web.'
-        );
+        errMsg = 'Không tìm thấy phần cứng Camera/Webcam trên Laptop. Thầy/Cô vui lòng kiểm tra phím tắt bật Webcam trên bàn phím Laptop (Fn + F6/F8/F10) hoặc kết nối Webcam USB / DroidCam.';
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        setCameraError(
-          'Camera đang bị một ứng dụng khác (Zoom, Teams, Zalo, ứng dụng camera máy) sử dụng. Thầy/Cô vui lòng tắt các ứng dụng đó rồi bấm "Thử lại".'
-        );
+        errMsg = 'Camera Laptop đang được sử dụng bởi ứng dụng khác (Zoom, Google Meet, Zalo, Camera Windows). Thầy/Cô vui lòng đóng ứng dụng đó rồi bấm "Kiểm Tra Lại Thiết Bị".';
       } else {
-        setCameraError(
-          `Không thể kích hoạt camera: ${err.message || 'Lỗi thiết bị'}. Thầy/Cô có thể dùng tính năng "Chụp Bằng Camera Điện Thoại" hoặc "Chọn Ảnh Từ Thiết Bị".`
-        );
+        errMsg = `Không thể kết nối Camera Laptop: ${err.message || 'Lỗi phần cứng'}. Thầy/Cô hãy bấm "Kiểm Tra Thiết Bị Chụp Ảnh" để thử lại.`;
       }
+
+      setCameraError(errMsg);
+      const failDiag: CameraDeviceDiagnostic = {
+        isReady: false,
+        isChecking: false,
+        deviceCount: cameraDevices.length,
+        activeDeviceName: 'Chưa kết nối được Camera',
+        activeDeviceId: '',
+        resolution: 'N/A',
+        frameRate: 'N/A',
+        isLaptopBuiltIn: false,
+        isDroidCam: false,
+        message: errMsg,
+        checkedAt: new Date().toLocaleTimeString('vi-VN')
+      };
+      setDiagnosticInfo(failDiag);
+      onDeviceStatusChange?.(failDiag);
+    }
+  };
+
+  // Hàm Kiểm Tra Thiết Bị Chụp Ảnh theo yêu cầu người dùng
+  const handleCheckCameraDevice = async () => {
+    setActiveTab('camera');
+    setCapturedPreview(null);
+    await startCamera(selectedDeviceId || undefined, preferredSourceMode, true);
+  };
+
+  // Chuyển nhanh sang Camera tích hợp trên Laptop
+  const handleSelectLaptopBuiltInCamera = async () => {
+    setPreferredSourceMode('laptop-webcam');
+    setCapturedPreview(null);
+    const laptopCam = cameraDevices.find(d => d.label && !checkIsDroidCamLabel(d.label));
+    const targetId = laptopCam?.deviceId || '';
+    if (targetId) {
+      setSelectedDeviceId(targetId);
+    }
+    await startCamera(targetId || undefined, 'laptop-webcam', true);
+  };
+
+  // Chuyển nhanh sang nguồn DroidCam
+  const handleSelectDroidCamSource = async () => {
+    setPreferredSourceMode('droidcam');
+    setCapturedPreview(null);
+    const droidCam = cameraDevices.find(d => d.label && checkIsDroidCamLabel(d.label));
+    if (droidCam?.deviceId) {
+      setSelectedDeviceId(droidCam.deviceId);
+      await startCamera(droidCam.deviceId, 'droidcam', true);
+    } else {
+      await startCamera(undefined, 'droidcam', true);
     }
   };
 
@@ -214,6 +410,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
     }
     setIsCameraActive(false);
     setIsStartingCamera(false);
+    setActiveCountdown(null);
   };
 
   // Đóng dấu bản quyền sư phạm lên ảnh
@@ -257,7 +454,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
       ctx.fillStyle = '#ffffff';
       ctx.font = `${Math.max(11, Math.round(bannerH * 0.26))}px sans-serif`;
       ctx.fillText(
-        `Bài dạy: ${lessonTitle} • Môn ${sportName} • Ngày chụp: ${new Date().toLocaleDateString('vi-VN')}`,
+        `Bài dạy: ${lessonTitle} • Môn ${sportName} • Thiết bị: ${diagnosticInfo.activeDeviceName || 'Camera Laptop'} • ${new Date().toLocaleDateString('vi-VN')}`,
         24,
         canvas.height - bannerH + bannerH * 0.8
       );
@@ -267,8 +464,8 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
     img.src = sourceDataUrl;
   };
 
-  // Chụp ảnh snapshot từ video trực tiếp
-  const handleCaptureSnapshot = () => {
+  // Thực hiện chụp snapshot từ video trực tiếp trên Laptop
+  const executeImmediateSnapshot = () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
     const canvas = document.createElement('canvas');
@@ -279,7 +476,15 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0, vw, vh);
+    if (mirrorVideo) {
+      ctx.save();
+      ctx.translate(vw, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, vw, vh);
+      ctx.restore();
+    } else {
+      ctx.drawImage(video, 0, 0, vw, vh);
+    }
 
     if (addWatermark) {
       const bannerH = Math.max(52, Math.round(vh * 0.085));
@@ -303,7 +508,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
       ctx.fillStyle = '#ffffff';
       ctx.font = `${Math.max(11, Math.round(bannerH * 0.26))}px sans-serif`;
       ctx.fillText(
-        `Bài dạy: ${lessonTitle} • Môn ${sportName} • Ngày chụp: ${new Date().toLocaleDateString('vi-VN')}`,
+        `Bài dạy: ${lessonTitle} • Môn ${sportName} • Nguồn: ${diagnosticInfo.activeDeviceName || 'Camera Laptop'} • Ngày: ${new Date().toLocaleDateString('vi-VN')}`,
         24,
         vh - bannerH + bannerH * 0.8
       );
@@ -311,6 +516,29 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
 
     const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
     setCapturedPreview(dataUrl);
+  };
+
+  // Bấm nút Chụp Ảnh (hỗ trợ chụp ngay hoặc hẹn giờ 3 giây để GV tạo dáng động tác trước Laptop)
+  const handleCaptureSnapshot = () => {
+    if (!isCameraActive) return;
+
+    if (countdownSeconds <= 0) {
+      executeImmediateSnapshot();
+      return;
+    }
+
+    setActiveCountdown(countdownSeconds);
+    let remaining = countdownSeconds;
+    const timer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        setActiveCountdown(null);
+        executeImmediateSnapshot();
+      } else {
+        setActiveCountdown(remaining);
+      }
+    }, 1000);
   };
 
   // Chụp trực tiếp từ Camera điện thoại qua HTML5 Native Capture
@@ -331,11 +559,16 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
   // Lưu ảnh vừa chụp vào Kế hoạch bài dạy
   const handleSaveCapturedPhoto = () => {
     if (!capturedPreview) return;
+    const determinedSource: 'laptop-webcam' | 'droidcam' =
+      diagnosticInfo.isDroidCam || preferredSourceMode === 'droidcam'
+        ? 'droidcam'
+        : 'laptop-webcam';
+
     onPhotoCaptured({
       imageUrl: capturedPreview,
       title: photoTitle.trim() || `Ảnh thực tế: ${lessonTitle}`,
-      caption: photoCaption.trim() || `Ảnh chụp thực tế trên sân tập môn ${sportName} trường THPT Huỳnh Tấn Phát.`,
-      source: 'droidcam'
+      caption: photoCaption.trim() || `Ảnh chụp thực tế bằng ${determinedSource === 'laptop-webcam' ? 'Camera Laptop' : 'DroidCam'} môn ${sportName} trường THPT Huỳnh Tấn Phát.`,
+      source: determinedSource
     });
     setCapturedPreview(null);
     onClose();
@@ -382,7 +615,6 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
 
   if (!isOpen) return null;
 
-  const droidCamMjpegUrl = `http://${droidCamIp.trim()}:${droidCamPort.trim()}/mjpegfeed`;
   const droidCamBrowserUrl = `http://${droidCamIp.trim()}:${droidCamPort.trim()}`;
 
   return (
@@ -390,43 +622,184 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
       <div className="bg-slate-900 border-2 border-emerald-500/60 rounded-2xl max-w-4xl w-full p-4 sm:p-6 space-y-4 shadow-2xl text-white my-auto animate-fade-in">
         
         {/* HEADER MODAL */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3 gap-2">
           <div className="flex items-center gap-2.5">
             <span className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-lg shrink-0">
-              <i className="fa-solid fa-camera text-lg"></i>
+              <i className="fa-solid fa-laptop text-lg"></i>
             </span>
             <div>
-              <h2 className="font-bold text-base sm:text-lg text-emerald-300">
-                Chụp Ảnh Sân Tập & Đính Kèm Ảnh Minh Họa Bài Dạy
+              <h2 className="font-bold text-base sm:text-lg text-emerald-300 flex items-center gap-2 flex-wrap">
+                <span>Chụp Ảnh Bằng Camera Laptop & Kiểm Tra Thiết Bị Chụp Ảnh</span>
+                {diagnosticInfo.isReady && (
+                  <span className="text-[11px] bg-emerald-500/20 text-emerald-300 border border-emerald-400/50 px-2.5 py-0.5 rounded-full flex items-center gap-1.5 font-bold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                    <span>Thiết bị đã sẵn sàng</span>
+                  </span>
+                )}
               </h2>
               <p className="text-xs text-slate-400">
-                Hỗ trợ <strong>DroidCam Webcam</strong> • <strong>Camera Điện Thoại</strong> • <strong>Tải ảnh từ máy</strong>
+                Hỗ trợ <strong>Camera trên Laptop (Webcam tích hợp)</strong> • <strong>Kiểm tra thiết bị tự động</strong> • <strong>DroidCam & Tải ảnh từ máy</strong>
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-9 h-9 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
-            title="Đóng cửa sổ"
-          >
-            <i className="fa-solid fa-xmark text-lg"></i>
-          </button>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleCheckCameraDevice}
+              disabled={isStartingCamera}
+              className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition cursor-pointer shadow-md disabled:opacity-60"
+              title="Kiểm tra phần cứng camera trên laptop và thông báo trạng thái sẵn sàng"
+            >
+              <i className={`fa-solid ${isStartingCamera ? 'fa-spinner fa-spin' : 'fa-stethoscope'}`}></i>
+              <span>Kiểm Tra Thiết Bị Chụp Ảnh</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-9 h-9 rounded-lg bg-slate-800 hover:bg-rose-600 text-slate-300 hover:text-white flex items-center justify-center transition cursor-pointer"
+              title="Đóng cửa sổ"
+            >
+              <i className="fa-solid fa-xmark text-lg"></i>
+            </button>
+          </div>
+        </div>
+
+        {/* BANNER THÔNG BÁO KẾT QUẢ KIỂM TRA THIẾT BỊ CHỤP ẢNH (HIỂN THỊ RÕ RÀNG TRạng THÁI SẴN SÀNG) */}
+        <div
+          className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all ${
+            diagnosticInfo.isChecking || isStartingCamera
+              ? 'bg-sky-950/70 border-sky-500/50 text-sky-200'
+              : diagnosticInfo.isReady
+              ? 'bg-emerald-950/80 border-2 border-emerald-400 text-emerald-100 shadow-lg shadow-emerald-950/50'
+              : 'bg-rose-950/70 border-rose-500/60 text-rose-200'
+          }`}
+        >
+          <div className="flex items-start sm:items-center gap-2.5">
+            <div
+              className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 text-base ${
+                diagnosticInfo.isChecking || isStartingCamera
+                  ? 'bg-sky-600 text-white'
+                  : diagnosticInfo.isReady
+                  ? 'bg-emerald-500 text-slate-950 font-black'
+                  : 'bg-rose-600 text-white'
+              }`}
+            >
+              <i
+                className={`fa-solid ${
+                  diagnosticInfo.isChecking || isStartingCamera
+                    ? 'fa-circle-notch fa-spin'
+                    : diagnosticInfo.isReady
+                    ? 'fa-circle-check'
+                    : 'fa-triangle-exclamation'
+                }`}
+              ></i>
+            </div>
+
+            <div className="space-y-0.5 text-xs">
+              <div className="font-bold flex items-center gap-2 flex-wrap">
+                {diagnosticInfo.isChecking || isStartingCamera ? (
+                  <span className="text-sky-300 uppercase tracking-wide">
+                    ĐANG KIỂM TRA THIẾT BỊ CHỤP ẢNH TRÊN LAPTOP...
+                  </span>
+                ) : diagnosticInfo.isReady ? (
+                  <span className="text-emerald-300 text-sm uppercase tracking-wide flex items-center gap-1.5">
+                    <span>THÔNG BÁO: THIẾT BỊ CHỤP ẢNH ĐÃ SẴN SÀNG!</span>
+                    <span className="text-[10px] bg-emerald-500 text-slate-950 px-2 py-0.5 rounded font-black">
+                      ONLINE • SẴN SÀNG CHỤP
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-rose-300 uppercase tracking-wide">
+                    TRẠNG THÁI THIẾT BỊ: CHƯA KẾT NỐI HOẶC CẦN KIỂM TRA LẠI
+                  </span>
+                )}
+              </div>
+
+              <p className="text-[11px] opacity-95 leading-relaxed">
+                {diagnosticInfo.message}
+              </p>
+
+              {diagnosticInfo.isReady && (
+                <div className="flex items-center gap-3 flex-wrap pt-1 text-[11px] text-emerald-200/90 font-mono">
+                  <span className="bg-slate-900/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                    <i className="fa-solid fa-laptop mr-1 text-amber-300"></i>
+                    Thiết bị: <strong>{diagnosticInfo.activeDeviceName}</strong>
+                  </span>
+                  <span className="bg-slate-900/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                    <i className="fa-solid fa-expand mr-1 text-sky-300"></i>
+                    Độ phân giải: <strong>{diagnosticInfo.resolution}</strong>
+                  </span>
+                  <span className="bg-slate-900/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                    <i className="fa-solid fa-video mr-1 text-emerald-400"></i>
+                    Số camera phát hiện: <strong>{diagnosticInfo.deviceCount} thiết bị</strong>
+                  </span>
+                  {diagnosticInfo.checkedAt && (
+                    <span className="text-slate-300">
+                      Kiểm tra lúc: {diagnosticInfo.checkedAt}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleCheckCameraDevice}
+              className="px-3 py-1.5 bg-slate-900/90 hover:bg-slate-800 text-emerald-300 border border-emerald-500/50 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
+            >
+              <i className="fa-solid fa-rotate"></i>
+              <span>Kiểm tra lại</span>
+            </button>
+            {readyToastMessage && (
+              <button
+                type="button"
+                onClick={() => setReadyToastMessage('')}
+                className="text-xs text-emerald-300 hover:text-white px-1.5 py-1 cursor-pointer"
+                title="Ẩn thông báo"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 4 TAB ĐIỀU KHIỂN RÕ RÀNG */}
         <div className="flex gap-2 border-b border-slate-800 pb-2 overflow-x-auto text-xs font-bold scrollbar-none">
           <button
             type="button"
-            onClick={() => { setActiveTab('camera'); setCapturedPreview(null); }}
+            onClick={() => {
+              setActiveTab('camera');
+              setCapturedPreview(null);
+              handleSelectLaptopBuiltInCamera();
+            }}
             className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-              activeTab === 'camera'
-                ? 'bg-emerald-700 text-white shadow-md'
+              activeTab === 'camera' && preferredSourceMode === 'laptop-webcam'
+                ? 'bg-emerald-700 text-white shadow-md ring-1 ring-emerald-400'
                 : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700'
             }`}
           >
-            <i className="fa-solid fa-video text-amber-400"></i>
-            <span>1. Camera Trực Tiếp & DroidCam PC</span>
+            <i className="fa-solid fa-laptop text-amber-400"></i>
+            <span>1. Chụp Bằng Camera Laptop (Webcam)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('camera');
+              setCapturedPreview(null);
+              handleSelectDroidCamSource();
+            }}
+            className={`px-3 py-2 rounded-lg flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
+              activeTab === 'camera' && preferredSourceMode === 'droidcam'
+                ? 'bg-emerald-700 text-white shadow-md ring-1 ring-emerald-400'
+                : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700'
+            }`}
+          >
+            <i className="fa-solid fa-video text-emerald-400"></i>
+            <span>2. Camera DroidCam PC</span>
           </button>
 
           <button
@@ -439,7 +812,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
             }`}
           >
             <i className="fa-solid fa-mobile-screen text-sky-400"></i>
-            <span>2. Chụp Bằng Camera Điện Thoại</span>
+            <span>3. Chụp Bằng Camera Điện Thoại</span>
           </button>
 
           <button
@@ -452,7 +825,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
             }`}
           >
             <i className="fa-solid fa-circle-question text-teal-400"></i>
-            <span>3. Hướng Dẫn Kết Nối DroidCam</span>
+            <span>4. Hướng Dẫn DroidCam</span>
           </button>
 
           <button
@@ -465,70 +838,94 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
             }`}
           >
             <i className="fa-solid fa-folder-open text-purple-400"></i>
-            <span>4. Chọn Ảnh Trên Thiết Bị</span>
+            <span>5. Chọn Ảnh Trên Thiết Bị</span>
           </button>
         </div>
 
         {/* ========================================================= */}
-        {/* TAB 1: CAMERA TRỰC TIẾP / DROIDCAM CLIENT WEBCAM          */}
+        {/* TAB 1 & 2: CAMERA LAPTOP (WEBCAM) & DROIDCAM CLIENT       */}
         {/* ========================================================= */}
         {activeTab === 'camera' && (
           <div className="space-y-3.5">
-            {/* Thanh chọn thiết bị và tùy chỉnh */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs">
+            {/* Thanh chọn thiết bị camera trên Laptop và tùy chỉnh */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs">
               <div className="flex items-center gap-2 flex-1 flex-wrap">
-                <label className="font-semibold text-slate-300 shrink-0 flex items-center gap-1">
+                <label className="font-semibold text-slate-300 shrink-0 flex items-center gap-1.5">
                   <i className="fa-solid fa-camera text-emerald-400"></i>
-                  <span>Nguồn Camera:</span>
+                  <span>Thiết bị chụp ảnh:</span>
                 </label>
                 <select
                   value={selectedDeviceId}
                   onChange={(e) => {
                     const id = e.target.value;
                     setSelectedDeviceId(id);
-                    startCamera(id);
+                    startCamera(id, preferredSourceMode, true);
                   }}
-                  className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-emerald-500 flex-1 min-w-[200px] max-w-sm"
+                  className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-emerald-500 flex-1 min-w-[210px] max-w-sm font-medium"
                 >
                   {cameraDevices.length === 0 ? (
-                    <option value="">{isStartingCamera ? 'Đang kích hoạt camera...' : 'Camera mặc định thiết bị'}</option>
+                    <option value="">
+                      {isStartingCamera ? 'Đang kiểm tra camera trên laptop...' : 'Camera Laptop mặc định (Integrated Webcam)'}
+                    </option>
                   ) : (
                     cameraDevices.map((d, i) => {
-                      const isDroidCam = d.label.toLowerCase().includes('droidcam') || d.label.toLowerCase().includes('vcam');
+                      const isDroidCam = checkIsDroidCamLabel(d.label || '');
                       return (
                         <option key={d.deviceId || i} value={d.deviceId}>
-                          {d.label || `Camera ${i + 1}`} {isDroidCam ? '★ [DroidCam Kết Nối]' : ''}
+                          {d.label || `Camera Laptop ${i + 1}`} {isDroidCam ? '★ [DroidCam]' : '💻 [Camera Laptop]'}
                         </option>
                       );
                     })
                   )}
                 </select>
+
                 <button
                   type="button"
-                  onClick={() => startCamera()}
-                  className="p-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 rounded-lg cursor-pointer flex items-center gap-1"
-                  title="Làm mới và kết nối lại camera"
+                  onClick={handleCheckCameraDevice}
+                  className="px-2.5 py-1.5 bg-emerald-800/80 hover:bg-emerald-700 text-emerald-100 border border-emerald-500/40 rounded-lg cursor-pointer flex items-center gap-1.5 font-bold transition"
+                  title="Kiểm tra kết nối thiết bị chụp ảnh và làm mới luồng video"
                 >
-                  <i className="fa-solid fa-rotate"></i>
-                  <span>Làm mới</span>
+                  <i className="fa-solid fa-circle-check text-amber-300"></i>
+                  <span>Kiểm tra thiết bị</span>
                 </button>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2.5 flex-wrap shrink-0">
+                {/* Hẹn giờ chụp (Hữu ích khi GV tự chụp động tác mẫu trước Camera Laptop) */}
+                <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1">
+                  <i className="fa-solid fa-stopwatch text-amber-400"></i>
+                  <span className="text-slate-300">Hẹn giờ:</span>
+                  {[0, 3, 5].map(sec => (
+                    <button
+                      key={sec}
+                      type="button"
+                      onClick={() => setCountdownSeconds(sec)}
+                      className={`px-1.5 py-0.5 rounded font-bold cursor-pointer transition ${
+                        countdownSeconds === sec
+                          ? 'bg-emerald-600 text-white'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {sec === 0 ? 'Chụp ngay' : `${sec}s`}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Lật gương (Mirror) cho Camera trước của Laptop */}
                 <button
                   type="button"
-                  onClick={() => {
-                    const newMode = facingMode === 'environment' ? 'user' : 'environment';
-                    setFacingMode(newMode);
-                    setSelectedDeviceId('');
-                    startCamera();
-                  }}
-                  className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center gap-1 cursor-pointer"
-                  title="Chuyển camera trước / sau (trên điện thoại/tablet)"
+                  onClick={() => setMirrorVideo(prev => !prev)}
+                  className={`px-2.5 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer border transition ${
+                    mirrorVideo
+                      ? 'bg-sky-700 text-white border-sky-400'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                  }`}
+                  title="Lật ngược khung hình ngang (tiện lợi khi dùng Webcam trước của Laptop)"
                 >
-                  <i className="fa-solid fa-camera-rotate text-amber-400"></i>
-                  <span>Đổi Cam Trước/Sau</span>
+                  <i className="fa-solid fa-arrows-left-right text-amber-300"></i>
+                  <span>Lật gương</span>
                 </button>
+
                 <label className="flex items-center gap-1.5 text-slate-300 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -541,15 +938,17 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
               </div>
             </div>
 
-            {/* Khung hình Live Video hoặc Ảnh đã chụp */}
+            {/* Khung hình Live Video từ Camera Laptop hoặc Ảnh đã chụp */}
             {!capturedPreview ? (
-              <div className="relative bg-slate-950 rounded-xl overflow-hidden border border-slate-800 aspect-video flex items-center justify-center">
+              <div className="relative bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-800 aspect-video flex items-center justify-center">
                 <video
                   ref={videoRef}
                   autoPlay
                   playsInline
                   muted
-                  className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`}
+                  className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'} ${
+                    mirrorVideo ? '-scale-x-100' : ''
+                  }`}
                 />
 
                 {/* Vạch căn góc thể thao (Sports Framing Grid) khi camera đang chạy */}
@@ -567,55 +966,88 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                   </div>
                 )}
 
-                {/* Huy hiệu DroidCam trạng thái */}
+                {/* Huy hiệu trạng thái Thiết bị chụp ảnh đã sẵn sàng ngay trên góc màn hình Camera Laptop */}
                 {isCameraActive && (
-                  <div className="absolute top-3 left-3 bg-slate-900/90 border border-slate-700 px-2.5 py-1 rounded-lg text-[11px] font-mono flex items-center gap-1.5 shadow-md">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span>Camera Trực Tiếp 60 FPS</span>
+                  <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none gap-2 flex-wrap">
+                    <div className="bg-slate-900/90 border border-emerald-400/60 px-3 py-1.5 rounded-lg text-[11px] font-sans flex items-center gap-2 shadow-lg">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                      <span className="font-bold text-emerald-300">
+                        Thiết bị chụp ảnh đã sẵn sàng:
+                      </span>
+                      <span className="text-white font-semibold">
+                        {diagnosticInfo.activeDeviceName || 'Camera Laptop'}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-900/85 border border-slate-700 px-2.5 py-1 rounded-lg text-[11px] font-mono text-amber-300 shadow-md">
+                      {diagnosticInfo.resolution || 'HD 720p'} • {diagnosticInfo.frameRate || '60 FPS'}
+                    </div>
                   </div>
                 )}
 
-                {/* Nút chụp ảnh lớn nổi bật */}
+                {/* Đồng hồ đếm ngược khi hẹn giờ chụp trên Laptop */}
+                {activeCountdown !== null && (
+                  <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-[2px] flex flex-col items-center justify-center z-20 pointer-events-none">
+                    <div className="w-24 h-24 rounded-full bg-emerald-600/90 border-4 border-white flex items-center justify-center text-5xl font-black text-white shadow-2xl animate-bounce">
+                      {activeCountdown}
+                    </div>
+                    <p className="mt-3 text-sm font-bold text-amber-300 bg-slate-900/90 px-4 py-1 rounded-full">
+                      Chuẩn bị tư thế trước Camera Laptop...
+                    </p>
+                  </div>
+                )}
+
+                {/* Nút chụp ảnh bằng Camera Laptop nổi bật */}
                 {isCameraActive && (
-                  <div className="absolute bottom-4 inset-x-0 flex justify-center items-center gap-3 pointer-events-auto">
+                  <div className="absolute bottom-4 inset-x-0 flex justify-center items-center gap-3 pointer-events-auto px-4">
                     <button
                       type="button"
                       onClick={handleCaptureSnapshot}
-                      className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-full shadow-2xl flex items-center gap-2 cursor-pointer transition transform active:scale-95 border-2 border-white/50"
+                      disabled={activeCountdown !== null}
+                      className="px-7 py-3 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black rounded-full shadow-2xl flex items-center gap-2.5 cursor-pointer transition transform active:scale-95 border-2 border-white/70 disabled:opacity-50"
                     >
-                      <i className="fa-solid fa-camera-retro text-lg text-amber-300"></i>
-                      <span className="text-sm uppercase tracking-wide">Chụp Ảnh Khoảnh Khắc Ngay</span>
+                      <i className="fa-solid fa-camera text-xl text-amber-300"></i>
+                      <span className="text-sm uppercase tracking-wide">
+                        {countdownSeconds > 0
+                          ? `Chụp Bằng Camera Laptop (Hẹn giờ ${countdownSeconds}s)`
+                          : 'Chụp Ảnh Bằng Camera Laptop Ngay'}
+                      </span>
                     </button>
                   </div>
                 )}
 
-                {/* Trạng thái đang tải / khởi động camera */}
+                {/* Trạng thái đang kiểm tra / khởi động camera */}
                 {isStartingCamera && !cameraError && (
                   <div className="flex flex-col items-center justify-center p-6 space-y-3">
                     <i className="fa-solid fa-circle-notch fa-spin text-3xl text-emerald-400"></i>
-                    <p className="text-xs text-slate-300 font-medium">Đang kết nối camera và nhận diện nguồn DroidCam...</p>
+                    <p className="text-xs text-slate-200 font-bold">
+                      Đang kiểm tra thiết bị chụp ảnh và kích hoạt Camera trên Laptop...
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Hệ thống sẽ thông báo ngay khi thiết bị chụp ảnh đã sẵn sàng.
+                    </p>
                   </div>
                 )}
 
                 {/* Giao diện khi Camera chưa chạy hoặc bị lỗi */}
                 {!isCameraActive && !isStartingCamera && (
-                  <div className="p-6 text-center space-y-3 max-w-md">
+                  <div className="p-6 text-center space-y-3 max-w-lg">
                     <div className="w-14 h-14 mx-auto rounded-full bg-slate-800 text-amber-400 flex items-center justify-center text-2xl border border-slate-700">
-                      <i className="fa-solid fa-video-slash"></i>
+                      <i className="fa-solid fa-laptop"></i>
                     </div>
 
                     {cameraError ? (
                       <div className="space-y-1.5">
                         <p className="text-xs text-rose-300 font-semibold leading-relaxed">{cameraError}</p>
                         <p className="text-[11px] text-slate-400">
-                          Thầy/Cô có thể bấm <strong>"Bật Lại Camera"</strong> hoặc chuyển sang tab <strong>"Chụp Bằng Camera Điện Thoại"</strong> bên cạnh.
+                          Thầy/Cô có thể bấm <strong>"Kiểm Tra & Bật Camera Laptop"</strong> hoặc dùng tính năng <strong>"Chọn Ảnh Trên Thiết Bị"</strong>.
                         </p>
                       </div>
                     ) : (
                       <div className="space-y-1">
-                        <p className="text-xs font-bold text-slate-200">Camera chưa được kích hoạt</p>
+                        <p className="text-xs font-bold text-slate-200">Camera trên Laptop chưa được kích hoạt</p>
                         <p className="text-[11px] text-slate-400">
-                          Bấm nút bên dưới để cấp quyền mở Camera thiết bị hoặc nhận luồng từ DroidCam PC Client.
+                          Bấm nút bên dưới để kiểm tra thiết bị chụp ảnh, mở Webcam Laptop và nhận thông báo thiết bị sẵn sàng.
                         </p>
                       </div>
                     )}
@@ -623,46 +1055,48 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                     <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
                       <button
                         type="button"
-                        onClick={() => startCamera()}
-                        className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-md"
+                        onClick={handleCheckCameraDevice}
+                        className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-lg"
                       >
-                        <i className="fa-solid fa-play text-amber-300"></i>
-                        <span>Bật / Kết Nối Lại Camera</span>
+                        <i className="fa-solid fa-camera text-amber-300"></i>
+                        <span>Kiểm Tra & Bật Camera Laptop</span>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => setActiveTab('mobile-camera')}
-                        className="px-4 py-2 bg-sky-700 hover:bg-sky-600 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-md"
+                        onClick={() => setActiveTab('upload')}
+                        className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer border border-slate-700"
                       >
-                        <i className="fa-solid fa-mobile-screen"></i>
-                        <span>Dùng Camera Điện Thoại</span>
+                        <i className="fa-solid fa-folder-open text-purple-400"></i>
+                        <span>Chọn Ảnh Từ Laptop</span>
                       </button>
                     </div>
                   </div>
                 )}
               </div>
             ) : (
-              /* Xem lại ảnh đã chụp và điền thông tin */
-              <div className="space-y-3 bg-slate-950 p-3.5 rounded-xl border border-emerald-500/50 animate-fade-in">
+              /* Xem lại ảnh đã chụp từ Camera Laptop và điền thông tin */
+              <div className="space-y-3 bg-slate-950 p-3.5 rounded-xl border-2 border-emerald-500/70 animate-fade-in">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2">
                   <span className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
                     <i className="fa-solid fa-circle-check"></i>
-                    <span>Đã chụp ảnh khoảnh khắc thành công! Xem lại và thêm vào KHBD:</span>
+                    <span>
+                      Đã chụp ảnh bằng {diagnosticInfo.activeDeviceName || 'Camera Laptop'} thành công! Xem lại và lưu vào KHBD:
+                    </span>
                   </span>
                   <button
                     type="button"
                     onClick={() => setCapturedPreview(null)}
-                    className="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800 cursor-pointer"
+                    className="text-xs text-slate-300 hover:text-white px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 cursor-pointer font-bold"
                   >
                     <i className="fa-solid fa-arrow-rotate-left mr-1"></i>
-                    Chụp lại
+                    Chụp lại bằng Camera Laptop
                   </button>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
                   <div className="md:col-span-5 rounded-lg overflow-hidden border border-slate-800">
-                    <img src={capturedPreview} alt="Ảnh chụp" className="w-full h-44 object-contain bg-black" />
+                    <img src={capturedPreview} alt="Ảnh chụp từ Camera Laptop" className="w-full h-44 object-contain bg-black" />
                   </div>
 
                   <div className="md:col-span-7 space-y-2.5 text-xs">
@@ -692,10 +1126,10 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                       <button
                         type="button"
                         onClick={handleSaveCapturedPhoto}
-                        className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md"
+                        className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md"
                       >
                         <i className="fa-solid fa-plus"></i>
-                        <span>Thêm Vào Kế Hoạch Bài Dạy</span>
+                        <span>Đưa Ảnh Vào Kế Hoạch Bài Dạy</span>
                       </button>
                       <button
                         type="button"
@@ -713,7 +1147,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
         )}
 
         {/* ========================================================= */}
-        {/* TAB 2: CHỤP TRỰC TIẾP BẰNG CAMERA ĐIỆN THOẠI (NATIVE HTML5) */}
+        {/* TAB 3: CHỤP TRỰC TIẾP BẰNG CAMERA ĐIỆN THOẠI (NATIVE HTML5) */}
         {/* ========================================================= */}
         {activeTab === 'mobile-camera' && (
           <div className="space-y-4">
@@ -811,7 +1245,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
         )}
 
         {/* ========================================================= */}
-        {/* TAB 3: HƯỚNG DẪN KẾT NỐI DROIDCAM CHUẨN XÁC                */}
+        {/* TAB 4: HƯỚNG DẪN KẾT NỐI DROIDCAM CHUẨN XÁC                */}
         {/* ========================================================= */}
         {activeTab === 'droidcam-guide' && (
           <div className="space-y-4">
@@ -819,7 +1253,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
               
               <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm border-b border-slate-800 pb-2">
                 <i className="fa-solid fa-circle-info"></i>
-                <span>Cách Kết Nối DroidCam Với Máy Tính Chuẩn Nhất (Không Bị Chặn):</span>
+                <span>Cách Kết Nối DroidCam Với Laptop Chuẩn Nhất:</span>
               </div>
 
               {/* 3 BƯỚC DROIDCAM CLIENT */}
@@ -830,17 +1264,17 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                     <span>Cài Đặt DroidCam</span>
                   </span>
                   <p className="text-slate-300 leading-relaxed">
-                    Cài ứng dụng <strong>DroidCam</strong> trên điện thoại (CH Play / App Store) và phần mềm <strong>DroidCam Client</strong> trên máy tính từ trang chủ <code>dev47apps.com</code>.
+                    Cài ứng dụng <strong>DroidCam</strong> trên điện thoại (CH Play / App Store) và phần mềm <strong>DroidCam Client</strong> trên laptop từ trang chủ <code>dev47apps.com</code>.
                   </p>
                 </div>
 
                 <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 space-y-1.5">
                   <span className="font-bold text-amber-400 flex items-center gap-1.5">
                     <span className="w-5 h-5 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center text-[10px] font-black">2</span>
-                    <span>Bấm Start Trên PC</span>
+                    <span>Bấm Start Trên Laptop</span>
                   </span>
                   <p className="text-slate-300 leading-relaxed">
-                    Kết nối điện thoại với máy tính qua <strong>Cáp USB</strong> (ổn định nhất) hoặc chung WiFi, nhập IP điện thoại vào phần mềm máy tính rồi bấm <strong>Start</strong>.
+                    Kết nối điện thoại với laptop qua <strong>Cáp USB</strong> hoặc chung WiFi, nhập IP điện thoại vào phần mềm máy tính rồi bấm <strong>Start</strong>.
                   </p>
                 </div>
 
@@ -850,7 +1284,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                     <span>Chọn Nguồn Trên Web</span>
                   </span>
                   <p className="text-slate-300 leading-relaxed">
-                    Quay lại Tab <strong>"1. Camera Trực Tiếp"</strong>, trong mục Chọn nguồn Camera Thầy/Cô sẽ thấy <strong>"DroidCam Source 1"</strong>, chọn nó là video sẽ hiển thị ngay!
+                    Bấm nút <strong>"Kiểm Tra Thiết Bị Chụp Ảnh"</strong> ở góc trên, chọn <strong>"DroidCam Source"</strong> trong danh sách thiết bị là có thể chụp ngay!
                   </p>
                 </div>
               </div>
@@ -859,9 +1293,9 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
               <div className="pt-2 border-t border-slate-800 space-y-2">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
-                    <h4 className="font-bold text-sky-400">Xem luồng DroidCam IP trên trình duyệt:</h4>
+                    <h4 className="font-bold text-sky-400">Cấu hình địa chỉ IP DroidCam nội bộ:</h4>
                     <p className="text-slate-400 text-[11px]">
-                      Do quy chuẩn bảo mật quốc tế HTTPS, trình duyệt sẽ chặn nhúng trực tiếp HTTP nội bộ vào trang web. Thầy/Cô hãy bấm nút mở tab mới bên dưới để xem trực tiếp:
+                      Khi xem camera trên DroidCam, Thầy/Cô cũng có thể chụp màn hình (<code>Win + Shift + S</code>) rồi bấm <strong>Ctrl + V</strong> ngay tại cửa sổ này để tự động dán ảnh.
                     </p>
                   </div>
                 </div>
@@ -895,15 +1329,8 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
                     className="px-3 py-1.5 bg-sky-700 hover:bg-sky-600 text-white rounded font-bold text-xs flex items-center gap-1.5 shadow-xs"
                   >
                     <i className="fa-solid fa-arrow-up-right-from-square"></i>
-                    <span>Mở Luồng DroidCam Tab Mới ({droidCamIp}:{droidCamPort})</span>
+                    <span>Mở Luồng DroidCam ({droidCamIp}:{droidCamPort})</span>
                   </a>
-                </div>
-
-                <div className="p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-lg text-emerald-200 text-xs flex items-center gap-2">
-                  <i className="fa-solid fa-paste text-amber-400 text-base shrink-0"></i>
-                  <span>
-                    <strong>Mẹo siêu nhanh:</strong> Khi xem camera trên tab DroidCam, Thầy/Cô chỉ cần chụp màn hình (phím <code>Win + Shift + S</code>), sau đó quay lại cửa sổ này bấm <strong>Ctrl + V</strong> là ảnh lập tức được tự động đóng dấu và đính kèm vào giáo án!
-                  </span>
                 </div>
               </div>
 
@@ -912,7 +1339,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
         )}
 
         {/* ========================================================= */}
-        {/* TAB 4: CHỌN ẢNH CÓ SẴN TRÊN THIẾT BỊ                      */}
+        {/* TAB 5: CHỌN ẢNH CÓ SẴN TRÊN THIẾT BỊ                      */}
         {/* ========================================================= */}
         {activeTab === 'upload' && (
           <div className="space-y-4">
@@ -922,7 +1349,7 @@ export const CourtPhotoCaptureModal: React.FC<CourtPhotoCaptureModalProps> = ({
               </div>
               <div className="space-y-1">
                 <h3 className="font-bold text-sm text-slate-200">
-                  Chọn ảnh chụp học sinh, sân bãi hoặc dụng cụ từ thiết bị
+                  Chọn ảnh chụp học sinh, sân bãi hoặc dụng cụ từ Laptop / Điện thoại
                 </h3>
                 <p className="text-xs text-slate-400">
                   Hỗ trợ JPG, PNG, WEBP • Chọn cùng lúc nhiều ảnh thực tế tại THPT Huỳnh Tấn Phát

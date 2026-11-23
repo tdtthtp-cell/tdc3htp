@@ -44,7 +44,12 @@ export const LessonDiagrams: React.FC<LessonDiagramsProps> = ({
             className={`${heightClass} object-contain rounded-xl shadow-inner w-full`}
             referrerPolicy="no-referrer"
           />
-          {image.source === 'droidcam' ? (
+          {image.source === 'laptop-webcam' ? (
+            <div className="w-full bg-slate-900/95 border-t border-slate-800 px-3 py-1.5 text-[11px] text-emerald-300 font-sans flex items-center gap-1.5">
+              <i className="fa-solid fa-laptop text-emerald-400 shrink-0"></i>
+              <span><strong>Nguồn ảnh:</strong> Chụp trực tiếp bằng Camera Laptop (Webcam) phục vụ Kế hoạch bài dạy THPT Huỳnh Tấn Phát</span>
+            </div>
+          ) : image.source === 'droidcam' ? (
             <div className="w-full bg-slate-900/95 border-t border-slate-800 px-3 py-1.5 text-[11px] text-sky-300 font-sans flex items-center gap-1.5">
               <i className="fa-solid fa-camera-retro text-amber-400 shrink-0"></i>
               <span><strong>Nguồn ảnh:</strong> Chụp trực tiếp qua DroidCam trên sân tập THPT Huỳnh Tấn Phát</span>
